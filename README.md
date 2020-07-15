@@ -4,10 +4,10 @@ midea air conditioning smart network device remote control (without m-smart clou
 an attempt to reverse engineer the air conditioning control protocol of the manufacturer midea (potentially of other brands. it is possible to identify such a device by using "NetHome" software).
 allows you to control the air conditioning smart device without using a m-smart cloud.
 
-## usage
- ```./ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20```
+## synopsis
 
-## options
+ ```./ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20```
+ 
 - __--help__             *brief help message*
 
 -  __--ip__              *device IP address or host name*
@@ -31,6 +31,8 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--unquote_num__     *do not use quotes for numbers*
 -  __--separator__       *field separator __[default: ":"]__*
 -  __--delimiter__       *fields delimiter __[default: "\n"]__*
+
+## options
 
 ### --help
 Print a brief help message and exits.
