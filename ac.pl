@@ -15,8 +15,8 @@ use Crypt::Mode::ECB ();
 
 use constant {
     PORT    => 6444,
+    RETRY   => 3,
     TIMEOUT => 5,
-    RETRY   => 3
 };
 
 use constant {
@@ -272,9 +272,9 @@ sub set_cmd {
     $data->[0x0a] = 0x40;
     push @{$data}, (0x00) x 3;
 
-    foreach my $key ( keys %{$settings} ) {
-        SETTINGS->{$key}->{input}->{set}->( $data, $settings->{$key} )
-          if exists SETTINGS->{$key}->{input}->{set};
+    for( keys %{$settings} ) {
+        SETTINGS->{$_}->{input}->{set}->( $data, $settings->{$_} )
+          if exists SETTINGS->{$_}->{input}->{set};
     }
 
     push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
@@ -641,7 +641,6 @@ Separator to be used between tuples
 =head1 DESCRIPTION
 
 B<This program> allows you to control your midea air conditioning smart network device without an m-smart cloud.
-
-Potentially, supports devices of other brands
+Potentially, supports devices of other brands.
 
 =cut
