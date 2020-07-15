@@ -85,43 +85,43 @@ and their values:
 ### --power
 The parameter controls the power state of the device
 
-It can take one of the following values: [on|off]
+It can take one of the following values: __[on|off]__
 
 ### --temp
 The parameter controls the target temperature that the device will try to reach
 
-It can take positive integer values from this range: [17..30]
+It can take positive integer values from this range: __[17..30]__
 
 ### --mode
 The parameter controls the operation mode of the device
 
-It can take one of the following values: [auto|cool|dry|heat|fan]
+It can take one of the following values: __[auto|cool|dry|heat|fan]__
 
 ### --fan
 The parameter controls the operation mode of the device blower fan
 
-It can take one of the following values: [auto|high|medium|low|silent]
+It can take one of the following values: __[auto|high|medium|low|silent]__
 
 ### --turbo
 The parameter controls the turbo mode of the device
 
-It can take one of the following values: [on|off]
+It can take one of the following values: __[on|off]__
 
 ### --swing
 The parameter controls the operation mode of the blinds of the
 device
 
-It can take one of the following values: [off|vertical|horizontal|both]
+It can take one of the following values: __[off|vertical|horizontal|both]__
 
 ### --eco
 The parameter controls the eco mode of the device
 
-It can take one of the following values: [on|off]
+It can take one of the following values: __[on|off]__
 
 ### --buzzer
 The parameter controls the sound response mode of the device
 
-It can take one of the following values: [on|off]
+It can take one of the following values: __[on|off]__
 
 ### --value
 Enables output of values alone, without field names
