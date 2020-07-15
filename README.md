@@ -13,7 +13,7 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--id__              *device id.  ex: 21354673567853*
 -  __--ip__              *device address. ip address or host name*
 
--  __--get__             *fetch device settings __[default]__*
+-  __--get__             *fetch device settings*
 -  __--set__             *update device settings*
 
 -  __--power__           *turn power state: __[on|off]__*
