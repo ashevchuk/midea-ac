@@ -8,22 +8,22 @@ allows you to control the air conditioning smart device without using a m-smart 
  ```./ac.pl --id 21354673567853 --ip 192.168.1.2 --set --power on --mode cool --temp 20```
 
 ## options
-- --help             *brief help message*
+- __--help__             *brief help message*
 
--  --id              *device id.  ex: 21354673567853*
--  --ip              *device address. ip address or host name*
+-  __--id__              *device id.  ex: 21354673567853*
+-  __--ip__              *device address. ip address or host name*
 
--  --get             *fetch device settings [default]*
--  --set             *update device settings*
+-  __--get__             *fetch device settings [default]*
+-  __--set__             *update device settings*
 
--  --power           *turn power state: [on|off]*
--  --temp            *set target temperature: [17..30]*
--  --mode            *set operational mode: [auto|cool|dry|heat|fan]*
--  --fan             *set fan speed: [auto|high|medium|low|silent]*
--  --turbo           *turn turbo mode: [on|off]*
--  --swing           *set swing mode: [off|vertical|horizontal|both]*
--  --eco             *turn eco mode: [on|off]*
--  --buzzer          *turn audible feedback: [on|off]*
+-  __--power__           *turn power state: [on|off]*
+-  __--temp__            *set target temperature: [17..30]*
+-  __--mode__            *set operational mode: [auto|cool|dry|heat|fan]*
+-  __--fan__             *set fan speed: [auto|high|medium|low|silent]*
+-  __--turbo__           *turn turbo mode: [on|off]*
+-  __--swing__           *set swing mode: [off|vertical|horizontal|both]*
+-  __--eco__             *turn eco mode: [on|off]*
+-  __--buzzer__          *turn audible feedback: [on|off]*
 
 ### Perl dependencies
 - IO::Socket
