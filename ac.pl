@@ -8,13 +8,15 @@ use Getopt::Long ();
 
 use IO::Socket       ();
 use List::Util       ();
+use Scalar::Util     ();
 use Digest::MD5      ();
 use Digest::CRC      ();
 use Crypt::Mode::ECB ();
 
 use constant {
     PORT    => 6444,
-    TIMEOUT => 5
+    TIMEOUT => 5,
+    RETRY   => 3
 };
 
 use constant {
@@ -38,16 +40,26 @@ use constant {
 };
 
 use constant {
+    DELIMITER => "\n",
+    SEPARATOR => ":",
+    OUT_BEGIN => undef,
+    OUT_END   => "\n",
+    ESCAPES   => {
+        ( map { $_ => $_ } ( '\\', '"', '$', '@' ) ),
+        ( 'r' => "\r", 'n' => "\n", 't' => "\t" ),
+        ( map { 'x' . unpack( 'H2', chr( $_ ) ) => chr( $_ ) } ( 0..255 ) ),
+        ( map { sprintf( '%03o', $_ ) => chr( $_ ) } ( 0..255 ) )
+    }
+};
+
+use constant {
     PACKET => [
         0x5a, 0x5a, 0x01, 0x11, 0x68, 0x00, 0x20, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    ]
-};
-
-use constant {
+    ],
     COMMAND => [
         0xaa, 0x20, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x03, 0x41, 0x81, 0x00, 0xff, 0x03, 0xff,
@@ -219,10 +231,8 @@ sub decrypt ($) {
     inflate ( Crypt::Mode::ECB->new( AES => 0 )->decrypt( deflate( $_[0] ) , KEY ) );
 }
 
-sub get_cmd {
-    my $data = [ @{ +COMMAND } ];
-    push @{$data},
-      Digest::CRC->new(
+sub crc8 (+@) {
+    Digest::CRC->new(
         width  => 8,
         init   => 0x00,
         xorout => 0x00,
@@ -230,7 +240,25 @@ sub get_cmd {
         poly   => 0x0131,
         refin  => 1,
         cont   => 1
-      )->add( deflate [ @{$data}[ 0x0a .. $#$data ] ] )->digest();
+    )->add( deflate $_[0] )->digest();
+}
+
+sub unescape ($) {
+    $_[0] // "" =~ s{ (\A|\G|[^\\]) [\\] ( [0]\d\d | [x][\da-fA-F]{2} | . ) }{ $1 . ( ESCAPES->{ lc( $2 ) } ) }gsxer;
+}
+
+sub quote {
+    my ( $value, %opts ) = @_;
+    (exists $opts{unquote_num} and Scalar::Util::looks_like_number( $value ))
+    ? $value
+    : length($value)
+      ? sprintf("%s%s%s", unescape( $opts{quote} ) // "", $value, unescape( $opts{quote} ) // "")
+      : "";
+}
+
+sub get_cmd {
+    my $data = [ @{ +COMMAND } ];
+    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
     return $data;
 }
 
@@ -249,26 +277,14 @@ sub set_cmd {
           if exists SETTINGS->{$key}->{input}->{set};
     }
 
-    push @{$data},
-      Digest::CRC->new(
-        width  => 8,
-        init   => 0x00,
-        xorout => 0x00,
-        refout => 1,
-        poly   => 0x0131,
-        refin  => 1,
-        cont   => 1
-      )->add( deflate [ @{$data}[ 0x0a .. $#$data ] ] )->digest();
+    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
 
     return $data;
 }
 
 sub packet {
-    my ( $device_id, $command ) = @_;
+    my ( $command ) = @_;
     my $packet = [ @{ +PACKET } ];
-
-    @{$packet}[ 0x14, 0x19 ] =
-      @{ inflate reverse( pack( 'H*', sprintf( "%.2x", $device_id ) ) ) };
 
     push @{$command},
       0xff - List::Util::sum0( @{$command}[ 0x01 .. $#$command ] ) % 0x0100 + 0x01;
@@ -287,46 +303,39 @@ sub packet {
 }
 
 sub set_packet {
-    my ( $device_id, $settings ) = @_;
-    packet( $device_id, set_cmd($settings) );
+    my ( $settings ) = @_;
+    packet( set_cmd($settings) );
 }
 
 sub status_packet {
-    my ($device_id) = @_;
-    packet( $device_id, get_cmd() );
+    packet( get_cmd() );
 }
 
 sub device_settings {
     my ($data) = @_;
-
-    my $response = {};
-
     my $body = [ @{$data}[ 0x0a .. $#$data ] ];
-
-    foreach my $key ( keys %{ +SETTINGS } ) {
-        if ( exists SETTINGS->{$key}->{parse} ) {
-            $response->{$key} = SETTINGS->{$key}->{parse}->($body);
-        }
-    }
-
-    return $response;
+    return { map { exists SETTINGS->{$_}->{parse} ? ( $_ => SETTINGS->{$_}->{parse}->($body) ) : () } keys %{ +SETTINGS } };
 }
 
-sub response_val {
+sub settings_val {
     my ($data) = @_;
+    return { map { ( $_ => SETTINGS_VAL->{$_}->{val}->{$data->{$_}} // $data->{$_} ) } keys %{ $data } };
+}
 
-    my $response = {};
+sub settings_str {
+    my ( $data, $fields, %opts ) = @_;
+    my $settings = settings_val($data);
 
-    my $body = [ @{$data}[ 0x0a .. $#$data ] ];
-
-    foreach my $key ( keys %{ +SETTINGS } ) {
-        if ( exists SETTINGS->{$key}->{parse} ) {
-            my $value = SETTINGS->{$key}->{parse}->($body);
-            $response->{$key} = SETTINGS_VAL->{$key}->{val}->{$value} // $value;
-        }
-    }
-
-    return $response;
+    join "",
+    exists $opts{begin} ? unescape( $opts{begin} ) : OUT_BEGIN // "",
+    (join exists $opts{delimiter} ? unescape( $opts{delimiter} ) : DELIMITER,
+        map { sprintf( "%s%s%s",
+                quote( $opts{value} ? "" : $_, %opts ),
+                exists $opts{separator} ? unescape( $opts{separator} ) : ( exists $opts{value} ? "" : SEPARATOR ),
+                quote( $settings->{$_}, %opts )
+        ) }
+        sort grep { my $field = $_; scalar @{ $fields } ? grep { $field eq $_ } @{ $fields } : $field } keys %{$settings}),
+    exists $opts{end} ? unescape( $opts{end} ) : OUT_END // ""
 }
 
 sub settings {
@@ -377,40 +386,29 @@ sub request {
 }
 
 sub update {
-    my ( $device_ip, $device_id, $settings ) = @_;
+    my ( $device_ip, $settings ) = @_;
 
-    my $data = request( $device_ip, set_packet( $device_id, $settings ) );
+    my $retry = RETRY;
 
-    my $response = response_val($data);
+    while (--$retry) {
+        my $data = eval { request( $device_ip, set_packet( $settings ) ) } or next;
+        return device_settings($data);
+    }
 
-    printf(
-        "Device response after update:\n%s\n",
-        join "\n",
-        (
-            map { sprintf( "%s:%s", $_, $response->{$_} ) }
-            sort keys %{$response}
-        )
-    );
-
-    return device_settings($data);
+    die $@;
 }
 
 sub fetch {
-    my ( $device_ip, $device_id ) = @_;
+    my ( $device_ip ) = @_;
 
-    my $data = request( $device_ip, status_packet($device_id) );
+    my $retry = RETRY;
 
-    my $response = response_val($data);
-    printf(
-        "Device response after fetch:\n%s\n",
-        join "\n",
-        (
-            map { sprintf( "%s:%s", $_, $response->{$_} ) }
-            sort keys %{$response}
-        )
-    );
+    while (--$retry) {
+        my $data = eval { request( $device_ip, status_packet() ) } or next;
+        return device_settings($data);
+    }
 
-    return device_settings($data);
+    die $@;
 }
 
 my $option = {};
@@ -421,10 +419,16 @@ Getopt::Long::GetOptions(
       help
       set
       get
-      id=i
+      value
+      unquote_num
       ip=s
+      delimiter=s
+      separator=s
+      quote=s
+      begin=s
+      end=s
     ],
-    map { join "=", ( $_, SETTINGS->{$_}->{input}->{type} ) }
+    map { join ":", ( $_, SETTINGS->{$_}->{input}->{type} ) }
       grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
 );
 
@@ -432,9 +436,10 @@ Pod::Usage::pod2usage(1) if exists $option->{help};
 
 Pod::Usage::pod2usage(2)
   if ( not( exists $option->{set} or exists $option->{get} ) )
-  or ( not( exists $option->{id} and exists $option->{ip} ) )
+  or ( not( exists $option->{ip} ) )
   or (
-    grep {
+    exists $option->{set}
+    and grep {
         my $item = $_;
         (
             exists( $option->{$item} ) and exists( SETTINGS->{$item} )
@@ -447,12 +452,14 @@ Pod::Usage::pod2usage(2)
   );
 
 if ( exists $option->{set} ) {
-    update( $option->{ip}, $option->{id},
-        settings( $option, fetch( $option->{ip}, $option->{id} ) ) );
+    print settings_str( update( $option->{ip},
+        settings( $option, fetch( $option->{ip} ) ) ),
+        [ grep { exists SETTINGS->{$_} } keys %{ $option } ], %{ $option } );
 }
 
 if ( exists $option->{get} ) {
-    fetch( $option->{ip}, $option->{id} );
+    print settings_str( fetch( $option->{ip} ),
+        [ grep { exists SETTINGS->{$_} } keys %{ $option } ], %{ $option } );
 }
 
 __END__
@@ -463,13 +470,12 @@ ac.pl - midea air conditioning smart network device remote control (without m-sm
 
 =head1 SYNOPSIS
 
-ac.pl --id 21354673567853 --ip 192.168.1.2 --set --power on --mode cool --temp 20
+ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
 
  Options:
    --help            brief help message
 
-   --id              device id.  ex: 21354673567853
-   --ip              device address. ip address or host name
+   --ip              device IP address or host name
 
    --get             fetch device settings [default]
    --set             update device settings
@@ -483,6 +489,15 @@ ac.pl --id 21354673567853 --ip 192.168.1.2 --set --power on --mode cool --temp 2
    --eco             turn eco mode: [on|off]
    --buzzer          turn audible feedback: [on|off]
 
+   --value           output of values alone
+   --begin           beginning of the output string [default: none]
+   --end             end of the output string [default: "\n"]
+   --quote           use quotes [default: none]
+   --unquote_num     do not use quotes for numbers
+   --separator       field separator [default: ":"]
+   --delimiter       fields delimiter [default: "\n"]
+
+
 =head1 OPTIONS
 
 =over 4
@@ -491,11 +506,142 @@ ac.pl --id 21354673567853 --ip 192.168.1.2 --set --power on --mode cool --temp 2
 
 Print a brief help message and exits.
 
+=item B<--ip>
+
+IP address or host name of the device
+
+=item B<--get>
+
+The operation of reading device parameters
+
+By default, all fields will be displayed
+
+For example, you can display only one field (name with value) using the following arguments:
+
+...--get --temp
+
+Or display only the requested fields using the following arguments:
+
+...--get --temp --mode --power
+
+Or display only the value of the desired field, using the following arguments:
+
+...--get --power --value
+
+=item B<--set>
+
+The operation of writing device parameters
+
+For example, you can turn on the device using the following arguments and their values:
+
+...--set --power on
+
+Or turn off the device using the following arguments and their values:
+
+...--set --power off
+
+Or at the same time as the device is turned on, set the parameters and modes of its operation, using the following arguments and their values:
+
+...--set --power on --mode cool --swing off --fan auto --temp 20
+
+Or simply change one of the parameters using the following arguments and their values:
+
+...--set --temp 17
+
+=item B<--power>
+
+The parameter controls the power state of the device
+
+It can take one of the following values: [on|off]
+
+=item B<--temp>
+
+The parameter controls the target temperature that the device will try to reach
+
+It can take positive integer values from this range: [17..30]
+
+=item B<--mode>
+
+The parameter controls the operation mode of the device
+
+It can take one of the following values: [auto|cool|dry|heat|fan]
+
+=item B<--fan>
+
+The parameter controls the operation mode of the device blower fan
+
+It can take one of the following values: [auto|high|medium|low|silent]
+
+=item B<--turbo>
+
+The parameter controls the turbo mode of the device
+
+It can take one of the following values: [on|off]
+
+=item B<--swing>
+
+The parameter controls the operation mode of the blinds of the device
+
+It can take one of the following values: [off|vertical|horizontal|both]
+
+=item B<--eco>
+
+The parameter controls the eco mode of the device
+
+It can take one of the following values: [on|off]
+
+=item B<--buzzer>
+
+The parameter controls the sound response mode of the device
+
+It can take one of the following values: [on|off]
+
+=item B<--value>
+
+Enables output of values alone, without field names
+
+To output a simple array of values in JSON notation, use the following combination of arguments and their values:
+
+...--begin "[" --end "]" --delimiter "," --quote "\"" --unquote_num --value
+
+=item B<--begin>
+
+The string to be put at the beginning of the output
+
+=item B<--end>
+
+The string to be put at the end of the output
+
+=item B<--quote>
+
+Specifies the string that will be used at the beginning and at the end of each field name and the value itself individually
+
+=item B<--unquote_num>
+
+Cancels the string that will be used at the beginning and at the end of each value if the value itself is a number
+
+To display the output as formatted JSON, use the following combination of arguments and their values:
+
+...--begin "{\n\t" --end "\n}\n" --delimiter ",\n\t" --quote "\"" --unquote_num
+
+For unformatted JSON output, use the following combination of arguments and their values:
+
+...--begin "{" --end "}" --delimiter "," --quote "\"" --unquote_num
+
+=item B<--separator>
+
+The separator to be used between the name of the field and its value (tupple)
+
+=item B<--delimiter>
+
+Separator to be used between tuples
+
 =back
 
 =head1 DESCRIPTION
 
 B<This program> allows you to control your midea air conditioning smart network device without an m-smart cloud.
-Potentially, supports devices of other brands.
+
+Potentially, supports devices of other brands
 
 =cut

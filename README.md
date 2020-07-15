@@ -5,13 +5,12 @@ an attempt to reverse engineer the air conditioning control protocol of the manu
 allows you to control the air conditioning smart device without using a m-smart cloud.
 
 ## usage
- ```./ac.pl --id 21354673567853 --ip 192.168.1.2 --set --power on --mode cool --temp 20```
+ ```./ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20```
 
 ## options
 - __--help__             *brief help message*
 
--  __--id__              *device id.  ex: 21354673567853*
--  __--ip__              *device address. ip address or host name*
+-  __--ip__              *device IP address or host name*
 
 -  __--get__             *fetch device settings*
 -  __--set__             *update device settings*
@@ -24,6 +23,141 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--swing__           *set swing mode: __[off|vertical|horizontal|both]__*
 -  __--eco__             *turn eco mode: __[on|off]__*
 -  __--buzzer__          *turn audible feedback: __[on|off]__*
+
+-  __--value__           *output of values alone*
+-  __--begin__           *beginning of the output string __[default: none]__*
+-  __--end__             *end of the output string __[default: "\n"]__*
+-  __--quote__           *use quotes __[default: none]__*
+-  __--unquote_num__     *do not use quotes for numbers*
+-  __--separator__       *field separator __[default: ":"]__*
+-  __--delimiter__       *fields delimiter __[default: "\n"]__*
+
+### --help
+Print a brief help message and exits.
+
+### --ip
+IP address or host name of the device
+
+### --get
+The operation of reading device parameters
+By default, all fields will be displayed
+
+For example, you can display only one field (name with value) using
+the following arguments:
+
+```...--get --temp```
+
+Or display only the requested fields using the following arguments:
+
+```...--get --temp --mode --power```
+
+Or display only the value of the desired field, using the following
+arguments:
+
+```...--get --power --value```
+
+### --set
+The operation of writing device parameters
+
+For example, you can turn on the device using the following
+arguments and their values:
+
+```...--set --power on```
+
+Or turn off the device using the following arguments and their
+values:
+
+```...--set --power off```
+
+Or at the same time as the device is turned on, set the parameters
+and modes of its operation, using the following arguments and their
+values:
+
+```...--set --power on --mode cool --swing off --fan auto --temp 20```
+
+Or simply change one of the parameters using the following arguments
+and their values:
+
+```...--set --temp 17```
+
+### --power
+The parameter controls the power state of the device
+
+It can take one of the following values: [on|off]
+
+### --temp
+The parameter controls the target temperature that the device will try to reach
+
+It can take positive integer values from this range: [17..30]
+
+### --mode
+The parameter controls the operation mode of the device
+
+It can take one of the following values: [auto|cool|dry|heat|fan]
+
+### --fan
+The parameter controls the operation mode of the device blower fan
+
+It can take one of the following values: [auto|high|medium|low|silent]
+
+### --turbo
+The parameter controls the turbo mode of the device
+
+It can take one of the following values: [on|off]
+
+### --swing
+The parameter controls the operation mode of the blinds of the
+device
+
+It can take one of the following values: [off|vertical|horizontal|both]
+
+### --eco
+The parameter controls the eco mode of the device
+
+It can take one of the following values: [on|off]
+
+### --buzzer
+The parameter controls the sound response mode of the device
+
+It can take one of the following values: [on|off]
+
+### --value
+Enables output of values alone, without field names
+
+To output a simple array of values in JSON notation, use the
+following combination of arguments and their values:
+
+```...--begin "[" --end "]" --delimiter "," --quote "\"" --unquote_num --value```
+
+### --begin
+The string to be put at the beginning of the output
+
+### --end
+The string to be put at the end of the output
+
+### --quote
+Specifies the string that will be used at the beginning and at the
+end of each field name and the value itself individually
+
+### --unquote_num
+Cancels the string that will be used at the beginning and at the end
+of each value if the value itself is a number
+
+To display the output as formatted JSON, use the following
+combination of arguments and their values:
+
+```...--begin "{\n\t" --end "\n}\n" --delimiter ",\n\t" --quote "\"" --unquote_num```
+
+For unformatted JSON output, use the following combination of
+arguments and their values:
+
+```...--begin "{" --end "}" --delimiter "," --quote "\"" --unquote_num```
+
+### --separator
+The separator to be used between the name of the field and its value (tupple)
+
+### --delimiter
+Separator to be used between tuples
 
 ### Perl dependencies
 - IO::Socket
