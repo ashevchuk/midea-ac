@@ -42,6 +42,7 @@ use constant {
 use constant {
     DELIMITER => "\n",
     SEPARATOR => ":",
+    EMPTY_STR => "",
     OUT_BEGIN => undef,
     OUT_END   => "\n",
     ESCAPES   => {
@@ -216,23 +217,23 @@ use constant {
 };
 
 sub inflate ($) {
-    [ map { ord } split //, $_[0] ];
+    return [ map { ord } split //, $_[0] ];
 }
 
 sub deflate (+@) {
-    join "", map { chr } @{ $_[0] };
+    return join EMPTY_STR, map { chr } @{ $_[0] };
 }
 
 sub encrypt ($) {
-    inflate ( Crypt::Mode::ECB->new( AES => 0 )->encrypt( deflate( $_[0] ), KEY ) );
+    return inflate ( Crypt::Mode::ECB->new( AES => 0 )->encrypt( deflate( $_[0] ), KEY ) );
 }
 
 sub decrypt ($) {
-    inflate ( Crypt::Mode::ECB->new( AES => 0 )->decrypt( deflate( $_[0] ) , KEY ) );
+    return inflate ( Crypt::Mode::ECB->new( AES => 0 )->decrypt( deflate( $_[0] ) , KEY ) );
 }
 
 sub crc8 (+@) {
-    Digest::CRC->new(
+    return Digest::CRC->new(
         width  => 8,
         init   => 0x00,
         xorout => 0x00,
@@ -244,16 +245,16 @@ sub crc8 (+@) {
 }
 
 sub unescape ($) {
-    $_[0] // "" =~ s{ (\A|\G|[^\\]) [\\] ( [0]\d\d | [x][\da-fA-F]{2} | . ) }{ $1 . ( ESCAPES->{ lc( $2 ) } ) }gsxer;
+    return $_[0] // EMPTY_STR =~ s{ (\A|\G|[^\\]) [\\] ( [0]\d\d | [x][\da-fA-F]{2} | . ) }{ $1 . ( ESCAPES->{ lc( $2 ) } ) }sgerx;
 }
 
 sub quote {
     my ( $value, %opts ) = @_;
-    (exists $opts{unquote_num} and Scalar::Util::looks_like_number( $value ))
-    ? $value
-    : length($value)
-      ? sprintf("%s%s%s", unescape( $opts{quote} ) // "", $value, unescape( $opts{quote} ) // "")
-      : "";
+    return (exists $opts{unquote_num} and Scalar::Util::looks_like_number( $value ))
+        ? $value
+        : length($value)
+              ? sprintf("%s%s%s", unescape( $opts{quote} ) // EMPTY_STR, $value, unescape( $opts{quote} ) // EMPTY_STR)
+              : EMPTY_STR;
 }
 
 sub get_cmd {
@@ -297,65 +298,58 @@ sub packet {
     $packet->[0x04] = scalar( @{$packet} ) + BLOCK_LEN;
 
     push @{$packet},
-      @{ inflate Digest::MD5::md5( deflate($packet) . KEY_SIGN ) };
+      @{ inflate Digest::MD5::md5( deflate( $packet ) . KEY_SIGN ) };
 
     return $packet;
 }
 
 sub set_packet {
-    my ( $settings ) = @_;
-    packet( set_cmd($settings) );
+    return packet( set_cmd( $_[0] ) );
 }
 
 sub status_packet {
-    packet( get_cmd() );
+    return packet( get_cmd() );
 }
 
 sub device_settings {
     my ($data) = @_;
     my $body = [ @{$data}[ 0x0a .. $#$data ] ];
-    return { map { exists SETTINGS->{$_}->{parse} ? ( $_ => SETTINGS->{$_}->{parse}->($body) ) : () } keys %{ +SETTINGS } };
+    return { map { exists SETTINGS->{$_}->{parse} ? ( $_, SETTINGS->{$_}->{parse}->($body) ) : () } keys %{ +SETTINGS } };
 }
 
 sub settings_val {
     my ($data) = @_;
-    return { map { ( $_ => SETTINGS_VAL->{$_}->{val}->{$data->{$_}} // $data->{$_} ) } keys %{ $data } };
+    return { map { ( $_, SETTINGS_VAL->{$_}->{val}->{$data->{$_}} // $data->{$_} ) } keys %{ $data } };
 }
 
 sub settings_str {
     my ( $data, $fields, %opts ) = @_;
+
     my $settings = settings_val($data);
 
-    join "",
-    exists $opts{begin} ? unescape( $opts{begin} ) : OUT_BEGIN // "",
-    (join exists $opts{delimiter} ? unescape( $opts{delimiter} ) : DELIMITER,
-        map { sprintf( "%s%s%s",
-                quote( $opts{value} ? "" : $_, %opts ),
-                exists $opts{separator} ? unescape( $opts{separator} ) : ( exists $opts{value} ? "" : SEPARATOR ),
-                quote( $settings->{$_}, %opts )
-        ) }
-        sort grep { my $field = $_; scalar @{ $fields } ? grep { $field eq $_ } @{ $fields } : $field } keys %{$settings}),
-    exists $opts{end} ? unescape( $opts{end} ) : OUT_END // ""
+    return join EMPTY_STR,
+        exists $opts{begin} ? unescape( $opts{begin} ) : OUT_BEGIN // EMPTY_STR,
+        (join exists $opts{delimiter} ? unescape( $opts{delimiter} ) : DELIMITER,
+            map { sprintf( "%s%s%s",
+                    quote( $opts{value} ? EMPTY_STR : $_, %opts ),
+                    exists $opts{separator} ? unescape( $opts{separator} ) : ( exists $opts{value} ? EMPTY_STR : SEPARATOR ),
+                    quote( $settings->{$_}, %opts )
+            ) }
+            sort grep { my $field = $_; scalar @{ $fields } ? grep { $field eq $_ } @{ $fields } : $field } keys %{$settings}),
+        exists $opts{end} ? unescape( $opts{end} ) : OUT_END // EMPTY_STR;
 }
 
 sub settings {
     my ( $new, $old ) = @_;
-    my $combined = {};
 
-    foreach my $key ( keys %{ +SETTINGS } ) {
-        if ( exists SETTINGS->{$key}->{input} ) {
-            $combined->{$key} =
-              (       exists( $new->{$key} )
-                  and exists( SETTINGS->{$key}->{val}->{ $new->{$key} } ) )
-              ? SETTINGS->{$key}->{val}->{ $new->{$key} }
-              : $old->{$key};
-        }
-    }
-
-    return $combined;
+    return { map { ( $_ , ( (
+        exists( $new->{$_} ) and exists( SETTINGS->{$_}->{val}->{ $new->{$_} } ) )
+          ? SETTINGS->{$_}->{val}->{ $new->{$_} }
+          : $old->{$_} ) )
+        } grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS } };
 }
 
-sub send_request {
+sub net_request {
     my ( $device_ip, $data ) = @_;
 
     my $client = IO::Socket->new(
@@ -377,38 +371,36 @@ sub send_request {
     return inflate $buffer;
 }
 
-sub request {
+sub send_request {
     my ( $device_ip, $data ) = @_;
     my $response =
       decrypt(
-        [ @{ send_request( $device_ip, $data ) }[ 0x28 .. 0x57 ] ] );
+        [ @{ net_request( $device_ip, $data ) }[ 0x28 .. 0x57 ] ] );
     return [ @{$response}[ 0x00 .. $#$response - $response->[-1] ] ];
+}
+
+sub request {
+    my ( $device_ip, $packet ) = @_;
+
+    my $last_error;
+    my $retry = RETRY;
+
+    while (--$retry) {
+        my $data = eval { send_request( $device_ip, $packet ) } or $last_error = $@, next;
+        return device_settings($data);
+    }
+
+    die $last_error;
 }
 
 sub update {
     my ( $device_ip, $settings ) = @_;
-
-    my $retry = RETRY;
-
-    while (--$retry) {
-        my $data = eval { request( $device_ip, set_packet( $settings ) ) } or next;
-        return device_settings($data);
-    }
-
-    die $@;
+    return request( $device_ip, set_packet( $settings ) );
 }
 
 sub fetch {
     my ( $device_ip ) = @_;
-
-    my $retry = RETRY;
-
-    while (--$retry) {
-        my $data = eval { request( $device_ip, status_packet() ) } or next;
-        return device_settings($data);
-    }
-
-    die $@;
+    return request( $device_ip, status_packet() );
 }
 
 my $option = {};
