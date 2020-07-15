@@ -1,7 +1,7 @@
 # midea-ac
 midea air conditioning smart network device remote control (without m-smart cloud)
 
-an attempt to reverse engineer the air conditioning control protocol of the manufacturer midea (potentially of other brands).
+an attempt to reverse engineer the air conditioning control protocol of the manufacturer midea (potentially of other brands. it is possible to identify such a device by using "NetHome" software).
 allows you to control the air conditioning smart device without using a m-smart cloud.
 
 ## usage
