@@ -162,6 +162,7 @@ Separator to be used between tuples
 ### Perl dependencies
 - IO::Socket
 - List::Util
+- Scalar::Util
 - Digest::MD5
 - Digest::CRC
 - Crypt::Mode::ECB
