@@ -13,17 +13,17 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--id__              *device id.  ex: 21354673567853*
 -  __--ip__              *device address. ip address or host name*
 
--  __--get__             *fetch device settings [default]*
+-  __--get__             *fetch device settings __[default]__*
 -  __--set__             *update device settings*
 
--  __--power__           *turn power state: [on|off]*
--  __--temp__            *set target temperature: [17..30]*
--  __--mode__            *set operational mode: [auto|cool|dry|heat|fan]*
--  __--fan__             *set fan speed: [auto|high|medium|low|silent]*
--  __--turbo__           *turn turbo mode: [on|off]*
--  __--swing__           *set swing mode: [off|vertical|horizontal|both]*
--  __--eco__             *turn eco mode: [on|off]*
--  __--buzzer__          *turn audible feedback: [on|off]*
+-  __--power__           *turn power state: __[on|off]__*
+-  __--temp__            *set target temperature: __[17..30]__*
+-  __--mode__            *set operational mode: __[auto|cool|dry|heat|fan]__*
+-  __--fan__             *set fan speed: __[auto|high|medium|low|silent]__*
+-  __--turbo__           *turn turbo mode: __[on|off]__*
+-  __--swing__           *set swing mode: __[off|vertical|horizontal|both]__*
+-  __--eco__             *turn eco mode: __[on|off]__*
+-  __--buzzer__          *turn audible feedback: __[on|off]__*
 
 ### Perl dependencies
 - IO::Socket
