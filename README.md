@@ -32,6 +32,8 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--separator__       *field separator __[default: ":"]__*
 -  __--delimiter__       *fields delimiter __[default: "\n"]__*
 
+-  __--exit__            *exit code __0__ if value __ON__, else exit code __1__ __[eco|led|error|turbo|buzzer|unit|power]__*
+
 ## options
 
 ### --help
@@ -161,6 +163,19 @@ The separator to be used between the name of the field and its value (tupple)
 ### --delimiter
 Separator to be used between tuples
 
+### --exit
+The exit code will be used: if the specified parameter is set to __ON__, then the exit code will be __0__, otherwise, the exit code will be __1__
+
+It can take one of the following values: __[eco|led|error|turbo|buzzer|unit|power]__
+
+To check the power status of a device when used in third party scripts, use the following combination of arguments and their values:
+
+```...--exit power && echo "ac is on"```
+
+or
+
+```...--exit power || echo "ac is off"```
+
 ### Perl dependencies
 - IO::Socket
 - List::Util
@@ -170,3 +185,5 @@ Separator to be used between tuples
 - Crypt::Mode::ECB
 - Getopt::Long
 - Pod::Usage
+
+ac_nodeps.pl - is an experimental script without any perl dependencies, it uses only "standard" utilities: nc, xxd, md5sum and also openssl
