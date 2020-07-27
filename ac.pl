@@ -459,7 +459,7 @@ if ( exists $option->{exit} ) {
     Pod::Usage::pod2usage( sprintf(qq(Invaid exit value: "%s". It can take one of the following values: [%s]), $option->{exit}, join "|", grep { exists SETTINGS->{$_}->{parse} and exists SETTINGS->{$_}->{state} and SETTINGS->{$_}->{state} eq "bool" } keys %{ +SETTINGS } ) )
         unless exists SETTINGS->{$option->{exit}}->{parse};
 
-    exit (fetch( $option->{ip} )->{power} == ON ? 0 : 1);
+    exit ( fetch( $option->{ip} )->{ $option->{exit} } == ON ? 0 : 1 );
 }
 
 __END__
