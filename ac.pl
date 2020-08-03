@@ -330,17 +330,6 @@ use constant {
     } keys %{ +ALTERNATIVES }
 };
 
-sub lhex {
-    my ($item) = @_;
-    if ( ref($item) eq "ARRAY" ) {
-        return ( join ",", map { sprintf( "0x%.2x", $_ ) } @{$item} );
-    }
-    elsif ( not ref($item) ) {
-        return unpack( "H*", $item );
-    }
-}
-
-
 sub ahex {
     my ($item) = @_;
     if ( ref($item) eq "ARRAY" ) {
