@@ -15,6 +15,8 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--get__             *fetch device settings*
 -  __--set__             *update device settings*
 
+-  __--discover__        *searches for compatible devices*
+
 -  __--power__           *turn power state: __[on|off]__*
 -  __--temp__            *set target temperature: __[17..30]__*
 -  __--mode__            *set operational mode: __[auto|cool|dry|heat|fan]__*
@@ -175,6 +177,23 @@ To check the power status of a device when used in third party scripts, use the 
 or
 
 ```...--exit power || echo "ac is off"```
+
+### --discover
+Searches for compatible devices on the specified network
+
+The network can take values in the form of:
+
+single IP address:
+```...--ip 192.168.1.1```
+
+network with mask:
+```...--ip 192.168.1.0/255.255.255.0```
+
+network with mask length:
+```...--ip 192.168.1.0/24```
+
+range of IP addresses:
+```...--ip 192.168.1.1-192.168.1.8```
 
 ### Perl dependencies
 - IO::Socket
