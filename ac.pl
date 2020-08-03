@@ -1196,19 +1196,19 @@ The network can take values in the form of:
 
 single IP address:
 
-...--ip 192.168.1.1
+...--discover --ip 192.168.1.1
 
 network with mask:
 
-...--ip 192.168.1.0/255.255.255.0
+...--discover --ip 192.168.1.0/255.255.255.0
 
 network with mask length:
 
-...--ip 192.168.1.0/24
+...--discover --ip 192.168.1.0/24
 
 range of IP addresses:
 
-...--ip 192.168.1.1-192.168.1.8
+...--discover --ip 192.168.1.1-192.168.1.8
 
 =item B<--exit>
 
