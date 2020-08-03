@@ -3,20 +3,27 @@
 use strict;
 use warnings;
 
+use utf8;
+
 use Pod::Usage   ();
 use Getopt::Long ();
 
-use IO::Socket       ();
-use List::Util       ();
-use Scalar::Util     ();
-use Digest::MD5      ();
-use Digest::CRC      ();
-use Crypt::Mode::ECB ();
+use POSIX ();
+
+use List::Util  ();
+use Digest::MD5 ();
+use File::Spec  ();
+
+use Socket     ();
+use IO::Socket ();
+use IO::Handle ();
 
 use constant {
-    PORT    => 6444,
-    RETRY   => 3,
-    TIMEOUT => 5,
+    PORT           => 6444,
+    PORT_DISCOVER  => 6445,
+    RETRY          => 8,
+    TIMEOUT        => 8,
+    SCAN_NPROC_MAX => 4
 };
 
 use constant {
@@ -40,16 +47,27 @@ use constant {
 };
 
 use constant {
+    STATE_BOOLEAN => "boolean",
+    STATE_VALUE  => "value"
+};
+
+use constant {
+    EXIT_NORMAL => 0x00,
+    EXIT_ERROR  => 0x01
+};
+
+use constant {
     DELIMITER => "\n",
     SEPARATOR => ":",
     EMPTY_STR => "",
+    SPACE_STR => " ",
     OUT_BEGIN => undef,
     OUT_END   => "\n",
     ESCAPES   => {
-        ( map { $_ => $_ } ( '\\', '"', '$', '@' ) ),
         ( 'r' => "\r", 'n' => "\n", 't' => "\t" ),
-        ( map { 'x' . unpack( 'H2', chr( $_ ) ) => chr( $_ ) } ( 0..255 ) ),
-        ( map { sprintf( '%03o', $_ ) => chr( $_ ) } ( 0..255 ) )
+        ( map { $_ => $_ } ( '\\', '"', '$', '@' ) ),
+        ( map { 'x' . unpack( 'H2', chr($_) ) => chr($_) } ( 0x00 .. 0xff ) ),
+        ( map { sprintf( '%03o', $_ )         => chr($_) } ( 0x00 .. 0xff ) )
     }
 };
 
@@ -61,6 +79,12 @@ use constant {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     ],
+    DISCOVER => [
+        0xff, 0x00, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e,
+        0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e, 0x0e,
+        0x8a, 0x8d, 0xfa, 0x64, 0x70, 0xae, 0x00, 0xcf,
+        0xd8, 0x5c, 0x16, 0x15, 0x96, 0xac, 0x8e
+    ],
     COMMAND => [
         0xaa, 0x20, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x03, 0x41, 0x81, 0x00, 0xff, 0x03, 0xff,
@@ -71,7 +95,7 @@ use constant {
 
 use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' };
 
-use constant { KEY => Digest::MD5::md5(KEY_SIGN) };
+use constant { KEY => Digest::MD5::md5(KEY_SIGN) };    # 6a92ef406bad2f0359baad994171ea6d
 
 use constant {
     SETTINGS => {
@@ -80,9 +104,11 @@ use constant {
                 type => OPT_STR,
                 set  => sub { $_[0]->[0x0d] = $_[1] }
             },
-            parse => sub { List::Util::min( ( $_[0]->[0x03] & 0x7f ), 0x65 ) },
-            val => {
-                auto   => 0x65,
+            state => STATE_VALUE,
+            parse => sub { ( $_[0]->[0x03] & 0x7f ) },
+            val   => {
+                auto   => 0x66,
+                dry    => 0x65,
                 high   => 0x50,
                 medium => 0x3c,
                 low    => 0x28,
@@ -95,8 +121,9 @@ use constant {
                 set  => sub {
                     $_[0]->[0x0c] &= ~0xe0;
                     $_[0]->[0x0c] |= ( $_[1] << 0x05 ) & 0xe0;
-                  }
+                }
             },
+            state => STATE_VALUE,
             parse => sub { ( $_[0]->[0x02] & 0xe0 ) >> 0x05 },
             val   => {
                 auto => 0x01,
@@ -110,9 +137,14 @@ use constant {
             input => {
                 type => OPT_STR,
                 set =>
-                  sub { $_[0]->[0x11] &= ~0x0f; $_[0]->[0x11] |= $_[1] & 0x0f }
+
+#                  sub { $_[0]->[0x11] &= ~0x0f; $_[0]->[0x11] |= $_[1] & 0x0f }
+                  sub { $_[0]->[0x11] &= ~0x30; $_[0]->[0x11] |= $_[1] & 0x3f }
             },
-            parse => sub { $_[0]->[0x07] & 0x0f },
+            state => STATE_VALUE,
+
+            #            parse => sub { $_[0]->[0x07] & 0x0f },
+            parse => sub { $_[0]->[0x11] },
             val   => {
                 off        => 0x00,
                 vertical   => 0x0c,
@@ -126,10 +158,11 @@ use constant {
                 set  => sub {
                     $_[0]->[0x0b] &= ~0x01;
                     $_[0]->[0x0b] |= $_[1] ? ON : OFF;
-                  }
+                }
             },
+            state => STATE_BOOLEAN,
             parse => sub { ( $_[0]->[0x01] & 0x01 ) > OFF ? ON : OFF },
-            val => {
+            val   => {
                 off => OFF,
                 on  => ON
             }
@@ -140,9 +173,10 @@ use constant {
                 set  => sub {
                     $_[0]->[0x0b] &= ~0x42;
                     $_[0]->[0x0b] |= $_[1] ? 0x42 : OFF;
-                  }
+                }
             },
-            parse => sub { OFF },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x0b] & 0x42 ) > OFF ? ON : OFF },
             val   => {
                 off => OFF,
                 on  => ON
@@ -150,7 +184,8 @@ use constant {
         },
         error => {
             parse => sub { ( $_[0]->[0x01] & 0x80 ) > OFF ? ON : OFF },
-            val => {
+            state => STATE_BOOLEAN,
+            val   => {
                 no  => OFF,
                 yes => ON
             }
@@ -162,18 +197,20 @@ use constant {
                     $_[0]->[0x0c] &= ~0x1f;
                     $_[0]->[0x0c] |=
                       ( $_[1] & 0x0f ) | ( ( $_[1] << 0x04 ) & 0x10 );
-                  }
+                }
             },
-            parse => sub { ( $_[0]->[0x02] & 0x0f ) + BLOCK_LEN },
-            val => { map { ( $_, $_ ) } ( TEMP_MIN .. TEMP_MAX ) }
+            state => STATE_VALUE,
+            parse => sub { ( $_[0]->[0x02] & 0x0f ) + 16 },
+            val   => { map { ( $_, $_ ) } ( TEMP_MIN .. TEMP_MAX ) }
         },
         eco => {
             input => {
                 type => OPT_STR,
                 set  => sub { $_[0]->[0x13] = $_[1] ? 0xff : OFF }
             },
+            state => STATE_BOOLEAN,
             parse => sub { ( $_[0]->[0x09] & 0x10 ) > OFF ? ON : OFF },
-            val => {
+            val   => {
                 off => OFF,
                 on  => ON
             }
@@ -181,18 +218,59 @@ use constant {
         turbo => {
             input => {
                 type => OPT_STR,
-                set  => sub { $_[0]->[0x14] = $_[1] ? 0x02 : OFF }
+
+             #                set  => sub { $_[0]->[0x14] = $_[1] ? 0x02 : OFF }
+                set => sub {
+                    $_[1] ? $_[0]->[0x14] |= 0x02 : $_[0]->[0x14] &= ( ~0x02 );
+                }
             },
-            parse => sub { ( $_[0]->[0x0a] & 0x02 ) > OFF ? ON : OFF },
-            val => {
+            state => STATE_BOOLEAN,
+
+        #            parse => sub { ( $_[0]->[0x0a] & 0x02 ) > OFF ? ON : OFF },
+            parse => sub { $_[0]->[0x14] > OFF ? ON : OFF },
+            val   => {
                 off => OFF,
                 on  => ON
             }
         },
+        led => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[1] ? $_[0]->[0x14] |= 0x10 : $_[0]->[0x14] &= ( ~0x10 );
+                }
+            },
+            state => STATE_BOOLEAN,
+
+        #            parse => sub { ( $_[0]->[0x14] & 0x10 ) > OFF ? ON : OFF },
+            parse => sub { ( $_[0]->[0x0a] & 0x10 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        unit => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[1] ? $_[0]->[0x14] |= 0x04 : $_[0]->[0x14] &= ( ~0x04 );
+                }
+            },
+            state => STATE_BOOLEAN,
+
+        #            parse => sub { ( $_[0]->[0x14] & 0x04 ) > OFF ? ON : OFF },
+            parse => sub { ( $_[0]->[0x09] & 0x80 ) > OFF ? ON : OFF },
+            val   => {
+                "C" => OFF,
+                "F" => ON
+            }
+        },
         temp_int => {
+            state => STATE_VALUE,
             parse => sub { ( $_[0]->[0x0b] - 0x32 ) / 0x02 },
         },
         temp_ext => {
+            state => STATE_VALUE,
             parse => sub { ( $_[0]->[0x0c] - 0x32 ) / 0x02 },
         },
     }
@@ -211,50 +289,219 @@ use constant {
                         : ()
                     }
                 }
-              )
+            )
         } keys %{ +SETTINGS }
     }
 };
+
+use constant {
+    CRC8_TABLE_GEN => sub {
+        my ( $p, $v ) = ( 0x00, $_[1] );
+        do { $p |= 0x01 << ( $_[0] - $_ ) if $v & 0x01; $v = $v >> 0x01; }
+          for 0x01 .. $_[0];
+        return map {
+            my $i = $_;
+            $i = ( $i >> 0x01 ) ^ ( $i & 0x01 && $p ) for 0x00 .. 0x07;
+            $i & 0x02**$_[0] - 0x01
+        } 0x00 .. 0xff;
+    }
+};
+
+use constant { CRC8_TABLE => [ CRC8_TABLE_GEN->( 8, 0x0131 ) ] };
+
+use constant {
+    ALTERNATIVES => {
+        'Crypt::Mode::ECB' => {
+            bins => [qw(echo xxd openssl)],
+            subs => {
+                encrypt => 'encrypt_openssl',
+                decrypt => 'decrypt_openssl'
+            }
+        }
+    }
+};
+
+use constant {
+    map {
+        map {
+            my $sub = uc($_) . '_BIN';
+            defined *{"main::${sub}"} ? () : ( $sub => $_ )
+        } @{ ALTERNATIVES->{$_}->{bins} }
+    } keys %{ +ALTERNATIVES }
+};
+
+sub lhex {
+    my ($item) = @_;
+    if ( ref($item) eq "ARRAY" ) {
+        return ( join ",", map { sprintf( "0x%.2x", $_ ) } @{$item} );
+    }
+    elsif ( not ref($item) ) {
+        return unpack( "H*", $item );
+    }
+}
+
+
+sub ahex {
+    my ($item) = @_;
+    if ( ref($item) eq "ARRAY" ) {
+        return ( join EMPTY_STR, map { sprintf( "%.2x", $_ ) } @{$item} );
+    }
+    elsif ( not ref($item) ) {
+        return unpack( "H*", $item );
+    }
+}
+
+sub module_installed ($) {
+    return eval { require File::Spec->catfile( split( /:{2}/, $_[0] ) ) . '.pm' };
+}
+
+sub which ($) {
+    return grep { -f and -x } map { File::Spec->catfile( $_, $_[0] ) } split /:/, $ENV{PATH};
+}
 
 sub inflate ($) {
     return [ map { ord } split //, $_[0] ];
 }
 
 sub deflate (+@) {
-    return join EMPTY_STR, map { chr } @{ $_[0] };
+    return join EMPTY_STR, map { defined($_) ? chr($_) : 0x00 } @{ $_[0] };
 }
 
 sub encrypt ($) {
-    return inflate ( Crypt::Mode::ECB->new( AES => 0 )->encrypt( deflate( $_[0] ), KEY ) );
+    return inflate( Crypt::Mode::ECB->new( AES => 0 )->encrypt( deflate( $_[0] ), KEY ) );
 }
 
 sub decrypt ($) {
-    return inflate ( Crypt::Mode::ECB->new( AES => 0 )->decrypt( deflate( $_[0] ) , KEY ) );
+    return inflate( Crypt::Mode::ECB->new( AES => 0 )->decrypt( deflate( $_[0] ), KEY ) );
+}
+
+sub encrypt_openssl ($) {
+    my $cmd = join SPACE_STR, ECHO_BIN(), qw(-n), ahex( $_[0] ), qw(|), XXD_BIN(),
+      qw(-r -p |), OPENSSL_BIN(), qw(enc -e -nopad -aes-128-ecb -K), ahex(KEY),
+      qw(-in - -out - |), XXD_BIN(), qw(-p);
+    return inflate pack( "H*", join EMPTY_STR, split /\n/, qx($cmd) );
+}
+
+sub decrypt_openssl ($) {
+    my $cmd = join SPACE_STR, ECHO_BIN(), qw(-n), ahex( $_[0] ), qw(|), XXD_BIN(),
+      qw(-r -p |), OPENSSL_BIN(), qw(enc -d -nopad -aes-128-ecb -K), ahex(KEY),
+      qw(-in - -out - |), XXD_BIN(), qw(-p);
+    return inflate pack( "H*", join EMPTY_STR, split /\n/, qx($cmd) );
 }
 
 sub crc8 (+@) {
-    return Digest::CRC->new(
-        width  => 8,
-        init   => 0x00,
-        xorout => 0x00,
-        refout => 1,
-        poly   => 0x0131,
-        refin  => 1,
-        cont   => 1
-    )->add( deflate $_[0] )->digest();
+    my $crc = 0;
+    $crc = CRC8_TABLE->[ $crc ^ $_ ] for @{ $_[0] };
+    return $crc;
 }
 
 sub unescape ($) {
-    return $_[0] // EMPTY_STR =~ s{ (\A|\G|[^\\]) [\\] ( [0]\d\d | [x][\da-fA-F]{2} | . ) }{ $1 . ( ESCAPES->{ lc( $2 ) } ) }sgerx;
+    return $_[0] ? $_[0] =~ s{(\A|\G|[^\\])[\\]([0]\d\d|[x][\da-fA-F]{2}|.)}{$1.(ESCAPES->{lc $2})}sgerx : EMPTY_STR;
 }
 
 sub quote {
     my ( $value, %opts ) = @_;
-    return (exists $opts{unquote_num} and Scalar::Util::looks_like_number( $value ))
-        ? $value
-        : length($value)
-              ? sprintf("%s%s%s", unescape( $opts{quote} ) // EMPTY_STR, $value, unescape( $opts{quote} ) // EMPTY_STR)
-              : EMPTY_STR;
+    return
+      ( exists $opts{unquote_num}
+          and Scalar::Util::looks_like_number($value) ) ? $value
+      : length($value) ? sprintf( "%s%s%s",
+        unescape( $opts{quote} ) // EMPTY_STR,
+        $value, unescape( $opts{quote} ) // EMPTY_STR )
+      : EMPTY_STR;
+}
+
+sub aton ($$) {
+    my $mask = 0;
+
+    if ( $_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} ) {
+        my $b = 24;
+        foreach ( $1, $2, $3, $4 ) {
+            return undef if $_ > 0xff || $_ < 0x00;
+            $mask += $_ << $b;
+            $b    -= 8;
+        }
+        if ( $_[1] ) {
+            my $wc;
+            $mask = ~$mask if ( $mask & ( 1 << 31 ) ) == 0;
+            for ( 0 .. 31 ) {
+                if ( ( $mask & ( 1 << ( 31 - $_ ) ) ) == 0 ) {
+                    $wc = 1;
+                }
+                elsif ($wc) {
+                    return undef;
+                }
+            }
+        }
+        return $mask;
+    }
+
+    if ( $_[0] =~ m{^\/?(\d{1,2})$} ) {
+        return undef if $1 < 1 || $1 > 32;
+        $mask |= 1 << ( 31 - $_ ) for ( 0 .. $1 - 1 );
+        return $mask;
+    }
+
+    return undef;
+}
+
+sub ntoa ($) {
+    return join ".", unpack( "CCCC", pack( "N", $_[0] ) );
+}
+
+sub parse_net ($) {
+    my $result = {};
+
+    if ( $_[0] =~ m{^(.+?)\/(.+)$} ) {
+        $result->{address} = aton( $1, 0 );
+        $result->{netmask} = aton( $2, 1 );
+    }
+    elsif ( $_[0] =~ m{^(.+)\/$} ) {
+        $result->{address} = aton( $1, 0 );
+        $result->{netmask} = aton( 32, 0 );
+    }
+    else {
+        $result->{address} = aton( $_[0], 0 );
+        $result->{netmask} = aton( 32,    0 );
+    }
+
+    return undef unless $result->{address};
+
+    $result->{mask_len} = 0;
+    while (
+        ( $result->{netmask} & ( 1 << ( 31 - $result->{mask_len} ) ) ) != 0 )
+    {
+        last if $result->{mask_len} > 31;
+        $result->{mask_len}++;
+    }
+
+    my $network   = $result->{address} & $result->{netmask};
+    my $broadcast = $network | ( ( ~$result->{netmask} ) & 4294967295 );
+
+    $result->{wildcard} = ~$result->{netmask};
+
+    $result->{host_min} = $network + 1;
+    $result->{host_max} = $broadcast - 1;
+    $result->{total}    = $result->{host_max} - $result->{host_min} + 1;
+
+    if ( $result->{mask_len} == 31 ) {
+        $result->{host_max} = $broadcast;
+        $result->{host_min} = $network;
+        $result->{total}    = 2;
+    }
+    elsif ( $result->{mask_len} == 32 ) {
+        $result->{total} = 1;
+        $result->{host}  = $network;
+    }
+    else {
+        $result->{network}   = $network;
+        $result->{broadcast} = $broadcast if $result->{mask_len} < 31;
+    }
+
+    return $result;
+}
+
+sub parse_net_addr {
+    return [ map { parse_net($_) } split /\-/, $_[0] ];
 }
 
 sub get_cmd {
@@ -273,7 +520,7 @@ sub set_cmd {
     $data->[0x0a] = 0x40;
     push @{$data}, (0x00) x 3;
 
-    for( keys %{$settings} ) {
+    for ( keys %{$settings} ) {
         SETTINGS->{$_}->{input}->{set}->( $data, $settings->{$_} )
           if exists SETTINGS->{$_}->{input}->{set};
     }
@@ -283,22 +530,28 @@ sub set_cmd {
     return $data;
 }
 
+sub discover_cmd {
+    my $data = [ @{ +DISCOVER } ];
+    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
+    return $data;
+}
+
 sub packet {
-    my ( $command ) = @_;
+    my ($command, %fields) = @_;
     my $packet = [ @{ +PACKET } ];
 
-    push @{$command},
-      0xff - List::Util::sum0( @{$command}[ 0x01 .. $#$command ] ) % 0x0100 + 0x01;
+    $packet->[$_] = $fields{$_} for ( keys %fields );
+
+    push @{$command}, ( ( ~List::Util::sum0( @{$command}[ 0x01 .. $#$command ] ) + 0x01 ) & 0xff );
 
     my $pad = BLOCK_LEN - ( scalar( @{$command} ) % BLOCK_LEN );
     push @{$command}, ($pad) x $pad;
 
-    push @{$packet}, @{ encrypt( $command ) };
+    push @{$packet}, @{ encrypt($command) };
 
     $packet->[0x04] = scalar( @{$packet} ) + BLOCK_LEN;
 
-    push @{$packet},
-      @{ inflate Digest::MD5::md5( deflate( $packet ) . KEY_SIGN ) };
+    push @{$packet}, @{ inflate Digest::MD5::md5( deflate($packet) . KEY_SIGN ) };
 
     return $packet;
 }
@@ -311,15 +564,55 @@ sub status_packet {
     return packet( get_cmd() );
 }
 
+sub discover_packet {
+    return packet( discover_cmd(), 0x06 => 0x92 );
+}
+
 sub device_settings {
     my ($data) = @_;
+
+    die "unknown response: " . _hex($data)
+      unless defined $data->[0x0a] and $data->[0x0a] == 0xc0;
+
     my $body = [ @{$data}[ 0x0a .. $#$data ] ];
-    return { map { exists SETTINGS->{$_}->{parse} ? ( $_, SETTINGS->{$_}->{parse}->($body) ) : () } keys %{ +SETTINGS } };
+
+    return {
+        map {
+            exists SETTINGS->{$_}->{parse}
+              ? do {
+                my $value = SETTINGS->{$_}->{parse}->($body);
+                die "unknown \"$_\" value: \"$value\""
+                  if scalar keys %{ SETTINGS_VAL->{$_}->{val} }
+                  and not exists SETTINGS_VAL->{$_}->{val}->{$value};
+                ( $_, $value );
+              }
+              : ()
+        } keys %{ +SETTINGS }
+    };
+}
+
+sub vals {
+    my ( $data, %opts ) = @_;
+    return join EMPTY_STR,
+      exists $opts{begin} ? unescape( $opts{begin} ) : OUT_BEGIN // EMPTY_STR,
+      (
+        join exists $opts{delimiter} ? unescape( $opts{delimiter} ) : DELIMITER,
+        map {
+            sprintf( "%s%s%s",
+                quote( $opts{value} ? EMPTY_STR : $_, %opts ),
+                exists $opts{separator}
+                ? unescape( $opts{separator} )
+                : ( exists $opts{value} ? EMPTY_STR : SEPARATOR ),
+                quote( $data->{$_}, %opts ) )
+          }
+          sort keys %{$data}
+      ),
+      exists $opts{end} ? unescape( $opts{end} ) : OUT_END // EMPTY_STR;
 }
 
 sub settings_val {
     my ($data) = @_;
-    return { map { ( $_, SETTINGS_VAL->{$_}->{val}->{$data->{$_}} // $data->{$_} ) } keys %{ $data } };
+    return { map { ( $_, SETTINGS_VAL->{$_}->{val}->{ $data->{$_} } // $data->{$_} ) } keys %{$data} };
 }
 
 sub settings_str {
@@ -327,26 +620,35 @@ sub settings_str {
 
     my $settings = settings_val($data);
 
-    return join EMPTY_STR,
-        exists $opts{begin} ? unescape( $opts{begin} ) : OUT_BEGIN // EMPTY_STR,
-        (join exists $opts{delimiter} ? unescape( $opts{delimiter} ) : DELIMITER,
-            map { sprintf( "%s%s%s",
-                    quote( $opts{value} ? EMPTY_STR : $_, %opts ),
-                    exists $opts{separator} ? unescape( $opts{separator} ) : ( exists $opts{value} ? EMPTY_STR : SEPARATOR ),
-                    quote( $settings->{$_}, %opts )
-            ) }
-            sort grep { my $field = $_; scalar @{ $fields } ? grep { $field eq $_ } @{ $fields } : $field } keys %{$settings}),
-        exists $opts{end} ? unescape( $opts{end} ) : OUT_END // EMPTY_STR;
+    return vals(
+        {
+            map { ( $_, $settings->{$_} ) } grep {
+                my $field = $_;
+                scalar @{$fields} ? grep { $field eq $_ } @{$fields} : $field
+            } keys %{$settings}
+        },
+        %opts
+    );
 }
 
 sub settings {
     my ( $new, $old ) = @_;
 
-    return { map { ( $_ , ( (
-        exists( $new->{$_} ) and exists( SETTINGS->{$_}->{val}->{ $new->{$_} } ) )
-          ? SETTINGS->{$_}->{val}->{ $new->{$_} }
-          : $old->{$_} ) )
-        } grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS } };
+    return {
+        map {
+            (
+                $_,
+                (
+                    (
+                              exists( $new->{$_} )
+                          and exists( SETTINGS->{$_}->{val}->{ $new->{$_} } )
+                    )
+                    ? SETTINGS->{$_}->{val}->{ $new->{$_} }
+                    : $old->{$_}
+                )
+            )
+        } grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
+    };
 }
 
 sub net_request {
@@ -363,19 +665,21 @@ sub net_request {
 
     $client->send( deflate $data) == scalar @{$data}
       or $client->close(), die "Send error";
+
     $client->recv( my $buffer, RESPONSE_LEN );
+
     $client->close();
 
-    length($buffer) == RESPONSE_LEN or die "Recv error";
+    my $len = length($buffer);
 
-    return inflate $buffer;
+    die "no response" unless $len;
+
+    return [ @{ inflate $buffer}[ 0x28 .. ( ( $len == 0x58 ) ? 0x47 : 0x57 ) ] ];
 }
 
 sub send_request {
     my ( $device_ip, $data ) = @_;
-    my $response =
-      decrypt(
-        [ @{ net_request( $device_ip, $data ) }[ 0x28 .. 0x57 ] ] );
+    my $response = decrypt( net_request( $device_ip, $data ) );
     return [ @{$response}[ 0x00 .. $#$response - $response->[-1] ] ];
 }
 
@@ -385,22 +689,185 @@ sub request {
     my $last_error;
     my $retry = RETRY;
 
-    while (--$retry) {
-        my $data = eval { send_request( $device_ip, $packet ) } or $last_error = $@, next;
-        return device_settings($data);
+    while ( --$retry ) {
+        my $data =
+          eval { device_settings( send_request( $device_ip, $packet ) ) }
+          or $last_error = $@, next;
+        return $data;
     }
 
     die $last_error;
 }
 
 sub update {
-    my ( $device_ip, $settings ) = @_;
-    return request( $device_ip, set_packet( $settings ) );
+    return request( $_[0], set_packet( $_[1] ) );
 }
 
 sub fetch {
-    my ( $device_ip ) = @_;
-    return request( $device_ip, status_packet() );
+    return request( $_[0], status_packet() );
+}
+
+sub net_port_check {
+    my $client = IO::Socket->new(
+        Domain   => IO::Socket::AF_INET,
+        Type     => IO::Socket::SOCK_STREAM,
+        Proto    => 'tcp',
+        Timeout  => POSIX::ceil( TIMEOUT / 2 ),
+        PeerHost => $_[0],
+        PeerPort => $_[1],
+    ) or return undef;
+
+    $client->close();
+
+    return 1;
+}
+
+sub net_discover {
+    if ( net_port_check( $_[0], PORT ) ) {
+
+        my $client = IO::Socket->new(
+            Domain    => IO::Socket::AF_INET,
+            Type      => IO::Socket::SOCK_DGRAM,
+            Proto     => 'udp',
+            Timeout   => TIMEOUT,
+            ReusePort => 1,
+            Broadcast => 1,
+            PeerHost  => $_[0],
+            PeerPort  => PORT_DISCOVER,
+            LocalPort => PORT_DISCOVER
+        ) or die "Socket error: $@";
+
+        $client->send(deflate discover_packet());
+
+        $client->recv( my $buffer, RESPONSE_LEN );
+
+        $client->close();
+
+        if ( length($buffer) ) {
+
+            my $data = inflate $buffer;
+
+            if (   ( $data->[0x00] == 0x5a and $data->[0x01] == 0x5a )
+                or ( $data->[0x08] == 0x5a and $data->[0x0a] == 0x5a ) )
+            {
+                $data = [ @{$data}[ 0x08 .. $#$data - 16 ] ]
+                  if $data->[0x08] == 0x5a and $data->[0x0a] == 0x5a;
+
+                $data = decrypt( [ @{$data}[ 0x28 .. $#$data ] ] );
+
+                $data = [ @{$data}[ 0x00 .. $#$data - $data->[-1] ] ];
+
+                return {
+                  address => $_[0],
+                  id => deflate ( [ @{$data}[ 0x29 .. 0x33 ] ] ),
+                  sn => deflate ( [ @{$data}[ 0x0e .. 0x23 ] ] )
+                };
+            }
+        }
+
+    }
+
+    return undef;
+}
+
+sub scan {
+    my ( $ip_address, %opts ) = @_;
+    my $net_address_list = parse_net_addr($ip_address);
+    my $net_address      = shift @{$net_address_list};
+
+    if ($net_address) {
+        $net_address->{host_min} = $net_address->{host} if exists $net_address->{host};
+
+        if ( scalar @{$net_address_list} ) {
+            $net_address->{host_max} = $net_address_list->[0]->{host} // $net_address_list->[0]->{host_max};
+        }
+        elsif ( exists $net_address->{host} ) {
+            $net_address->{host_max} = $net_address->{host};
+        }
+
+        my @hosts = $net_address->{host_min} .. $net_address->{host_max};
+        $net_address->{total} = scalar @hosts;
+
+        my $scan_nproc =
+          ( SCAN_NPROC_MAX > $net_address->{total} )
+          ? $net_address->{total}
+          : SCAN_NPROC_MAX;
+
+        my $batch_size = POSIX::ceil( $net_address->{total} / $scan_nproc );
+
+        socketpair( my $child, my $parent, Socket::AF_UNIX, Socket::SOCK_STREAM, Socket::PF_UNSPEC )
+          or die "socketpair error: $!";
+
+        $child->autoflush(1);
+        $parent->autoflush(1);
+
+        for ( 0 .. $scan_nproc - 1 ) {
+            my @hosts_to_scan = splice @hosts, 0, $batch_size;
+            last unless scalar @hosts_to_scan;
+
+            unless ( my $pid = fork() ) {
+                die "cannot fork: $!" unless defined $pid;
+                close $child;
+
+                for (@hosts_to_scan) {
+                    if ( my $result = net_discover( ntoa($_) ) ) {
+                        print $parent sprintf(
+                            "{%s}\n",
+                            join ",",
+                            (
+                                map {
+                                    sprintf( qq(%s=>"%s"), $_, $result->{$_} )
+                                } sort keys %{$result}
+                            )
+                        );
+                    }
+                    else {
+                        print $parent sprintf( qq({done=>"%s"}\n), $_ );
+                    }
+                }
+
+                close $parent;
+                exit EXIT_NORMAL;
+            }
+        }
+
+        close $parent;
+
+        $| = 1;
+
+        my $scans = 0;
+        my $found = [];
+
+        until ( waitpid( -1, POSIX::WNOHANG ) == -1 ) {
+            while ( my $line = <$child> ) {
+                $scans++;
+                chomp($line);
+                if ( $line =~ m{done} ) {
+                    print STDERR sprintf(
+                        "%s%%...\r",
+                        POSIX::ceil( $scans / ( $net_address->{total} * 0.01 ) )
+                    );
+                }
+                else {
+                    push @{$found}, eval $line;
+                }
+            }
+        }
+
+        close $child;
+
+        return $found;
+    }
+    else {
+        Pod::Usage::pod2usage( sprintf ( <<EOT, $_[0] ) );
+Invalid value for network address: "%s"
+The network address can take values in the form of an
+single IP address: "xxx.xxx.xxx.xxx"
+or a network with netmask: "xxx.xxx.xxx.xxx/xxx.xxx.xxx.xxx"
+or a network with mask length: "xxx.xxx.xxx.xxx/xx"
+or specifying a range of IP addresses: "xxx.xxx.xxx.xxx-xxx.xxx.xxx.xxx"
+EOT
+    }
 }
 
 my $option = {};
@@ -413,6 +880,7 @@ Getopt::Long::GetOptions(
       get
       value
       unquote_num
+      discover
       ip=s
       delimiter=s
       separator=s
@@ -420,16 +888,19 @@ Getopt::Long::GetOptions(
       begin=s
       end=s
       exit=s
-    ],
-    map { join ":", ( $_, SETTINGS->{$_}->{input}->{type} ) }
+      ],
+    map    { join ":", ( $_, SETTINGS->{$_}->{input}->{type} ) }
       grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
 );
 
 Pod::Usage::pod2usage(1) if exists $option->{help};
 
 Pod::Usage::pod2usage(2)
-  if ( not ( exists $option->{exit} ) and not ( exists $option->{set} or exists $option->{get} ) )
-  or ( not( exists $option->{ip} ) )
+  if ( not( exists $option->{ip} ) )
+  or (  not( exists $option->{exit} or exists $option->{discover} )
+    and not( exists $option->{set} or exists $option->{get} ) )
+  or ( exists $option->{set}
+    and not grep { exists SETTINGS->{$_}->{input} } keys %{$option} )
   or (
     exists $option->{set}
     and grep {
@@ -441,25 +912,103 @@ Pod::Usage::pod2usage(2)
                 keys %{ SETTINGS->{$item}->{val} }
               )
           )
+          and Pod::Usage::pod2usage(
+            sprintf(
+qq(Invaid %s value: "%s". It can take one of the following values: [%s]),
+                $item,    $option->{$item},
+                join "|", keys %{ SETTINGS->{$item}->{val} }
+            )
+          )
     } grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
   );
 
+foreach my $module ( map { split /\,/, $_ } keys %{ +ALTERNATIVES } ) {
+    unless ( module_installed($module) ) {
+        no strict 'refs';
+        no warnings 'redefine';
+
+        for ( @{ ALTERNATIVES->{$module}->{bins} } ) {
+            my $program = $_;
+            my $sub     = uc($program) . '_BIN';
+
+            if ( defined *{"main::${sub}"} ) {
+                $program = &{"main::${sub}"}();
+            }
+
+            unless ( -f $program and -x $program ) {
+                if ( ($program) = which($program) ) {
+                    *{"main::${sub}"} = sub () { "$program" };
+                }
+                else {
+                    print STDERR
+                      sprintf(
+qq(The "%s" program was not found. Please install this program, or install the perl module: "%s"\n),
+                        $_, $module );
+                    exit EXIT_ERROR;
+                }
+            }
+        }
+
+        foreach my $sub ( keys %{ ALTERNATIVES->{$module}->{subs} } ) {
+            my $alt_sub = ALTERNATIVES->{$module}->{subs}->{$sub};
+            *{"main::${sub}"} = *{"main::${alt_sub}"}
+              if defined *{"main::${alt_sub}"};
+        }
+    }
+}
+
+if ( exists $option->{discover} ) {
+    my $found = scan( $option->{ip}, %{$option} );
+
+    if ( scalar @{$found} ) {
+        print STDERR sprintf(
+            "\rFound %d device%s:\n",
+            scalar @{$found},
+            ( scalar @{$found} > 1 ? "s" : EMPTY_STR )
+        );
+        for ( @{$found} ) {
+            print STDERR "-" x 8 . "\n";
+            printf( "%s\n", vals( $_, %{$option} ) );
+        }
+    }
+    else {
+        print STDERR sprintf("\rNot found\n");
+    }
+
+    exit ( scalar @{$found} ? EXIT_NORMAL : EXIT_ERROR );
+}
+
 if ( exists $option->{set} ) {
-    print settings_str( update( $option->{ip},
-        settings( $option, fetch( $option->{ip} ) ) ),
-        [ grep { exists SETTINGS->{$_} } keys %{ $option } ], %{ $option } );
+    print settings_str(
+        update( $option->{ip}, settings( $option, fetch( $option->{ip} ) ) ),
+        [ grep { exists SETTINGS->{$_} } keys %{$option} ],
+        %{$option}
+    );
 }
 
 if ( exists $option->{get} ) {
-    print settings_str( fetch( $option->{ip} ),
-        [ grep { exists SETTINGS->{$_} } keys %{ $option } ], %{ $option } );
+    print settings_str(
+        fetch( $option->{ip} ),
+        [ grep { exists SETTINGS->{$_} } keys %{$option} ],
+        %{$option}
+    );
 }
 
 if ( exists $option->{exit} ) {
-    Pod::Usage::pod2usage( sprintf(qq(Invaid exit value: "%s". It can take one of the following values: [%s]), $option->{exit}, join "|", grep { exists SETTINGS->{$_}->{parse} and exists SETTINGS->{$_}->{state} and SETTINGS->{$_}->{state} eq "bool" } keys %{ +SETTINGS } ) )
-        unless exists SETTINGS->{$option->{exit}}->{parse};
+    Pod::Usage::pod2usage(
+        sprintf(
+qq(Invaid exit value: "%s". It can take one of the following values: [%s]),
+            $option->{exit},
+            join "|",
+            grep {
+                exists SETTINGS->{$_}->{parse}
+                  and exists SETTINGS->{$_}->{state}
+                  and SETTINGS->{$_}->{state} eq STATE_BOOLEAN
+            } keys %{ +SETTINGS }
+        )
+    ) unless exists SETTINGS->{ $option->{exit} }->{parse};
 
-    exit ( fetch( $option->{ip} )->{ $option->{exit} } == ON ? 0 : 1 );
+    exit( fetch( $option->{ip} )->{ $option->{exit} } == ON ? EXIT_NORMAL : EXIT_ERROR );
 }
 
 __END__
@@ -480,6 +1029,8 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --get             fetch device settings [default]
    --set             update device settings
 
+   --discover        searches for compatible devices
+
    --power           turn power state: [on|off]
    --temp            set target temperature: [17..30]
    --mode            set operational mode: [auto|cool|dry|heat|fan]
@@ -496,6 +1047,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --unquote_num     do not use quotes for numbers
    --separator       field separator [default: ":"]
    --delimiter       fields delimiter [default: "\n"]
+
    --exit            exit code 0 if value ON, else exit code 1 [eco|led|error|turbo|buzzer|unit|power]
 
 =head1 OPTIONS
@@ -635,6 +1187,28 @@ The separator to be used between the name of the field and its value (tupple)
 =item B<--delimiter>
 
 Separator to be used between tuples
+
+=item B<--discover>
+
+Searches for compatible devices on the specified network
+
+The network can take values in the form of:
+
+single IP address:
+
+...--ip 192.168.1.1
+
+network with mask:
+
+...--ip 192.168.1.0/255.255.255.0
+
+network with mask length:
+
+...--ip 192.168.1.0/24
+
+range of IP addresses:
+
+...--ip 192.168.1.1-192.168.1.8
 
 =item B<--exit>
 
