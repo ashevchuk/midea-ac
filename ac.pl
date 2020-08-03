@@ -760,7 +760,7 @@ sub net_discover {
 }
 
 sub scan {
-    my ( $ip_address, %opts ) = @_;
+    my ( $ip_address, $progress_cb ) = @_;
     my $net_address_list = parse_net_addr($ip_address);
     my $net_address      = shift @{$net_address_list};
 
@@ -822,8 +822,6 @@ sub scan {
 
         close $parent;
 
-        $| = 1;
-
         my $scans = 0;
         my $found = [];
 
@@ -832,10 +830,7 @@ sub scan {
                 $scans++;
                 chomp($line);
                 if ( $line =~ m{done} ) {
-                    print STDERR sprintf(
-                        "%s%%...\r",
-                        POSIX::ceil( $scans / ( $net_address->{total} * 0.01 ) )
-                    );
+                    $progress_cb->( POSIX::ceil( $scans / ( $net_address->{total} * 0.01 ) ) ) if ref $progress_cb eq "CODE";
                 }
                 else {
                     push @{$found}, eval $line;
@@ -947,7 +942,10 @@ qq(The "%s" program was not found. Please install this program, or install the p
 }
 
 if ( exists $option->{discover} ) {
-    my $found = scan( $option->{ip}, %{$option} );
+
+    $| = 1;
+
+    my $found = scan( $option->{ip}, sub { print STDERR sprintf("%s%%...\r", $_[0]) } );
 
     if ( scalar @{$found} ) {
         print STDERR sprintf(
