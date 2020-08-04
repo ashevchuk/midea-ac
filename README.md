@@ -195,13 +195,16 @@ network with mask length:
 range of IP addresses:
 ```...--discover --ip 192.168.1.1-192.168.1.8```
 
-### Perl dependencies
-- IO::Socket
+### Dependencies
+## CPAN modules
+- Crypt::Mode::ECB (or ```openssl``` binary. selection will be made automatically depending on the availability of one of the options)
+
+## Perl core modules
+- IO
+- POSIX
 - List::Util
 - Scalar::Util
 - Digest::MD5
-- Digest::CRC
-- Crypt::Mode::ECB
 - Getopt::Long
 - Pod::Usage
 
