@@ -18,7 +18,7 @@ allows you to control the air conditioning smart device without using a m-smart 
 -  __--discover__        *searches for compatible devices*
 
 -  __--power__           *turn power state: __[on|off]__*
--  __--temp__            *set target temperature: __[17..30]__*
+-  __--temp__            *set target temperature: __[16..30]__*
 -  __--mode__            *set operational mode: __[auto|cool|dry|heat|fan]__*
 -  __--fan__             *set fan speed: __[auto|high|medium|low|silent]__*
 -  __--turbo__           *turn turbo mode: __[on|off]__*
@@ -94,7 +94,7 @@ It can take one of the following values: __[on|off]__
 ### --temp
 The parameter controls the target temperature that the device will try to reach
 
-It can take positive integer values from this range: __[17..30]__
+It can take positive integer values from this range: __[16..30]__
 
 ### --mode
 The parameter controls the operation mode of the device
