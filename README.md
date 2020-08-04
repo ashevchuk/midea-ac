@@ -196,10 +196,10 @@ range of IP addresses:
 ```...--discover --ip 192.168.1.1-192.168.1.8```
 
 ## Dependencies
-##№ CPAN modules
+### CPAN modules
 - Crypt::Mode::ECB (or ```openssl``` binary. selection will be made automatically depending on the availability of one of the options)
 
-##№ Perl core modules
+### Perl core modules
 - IO
 - POSIX
 - List::Util
