@@ -184,20 +184,26 @@ Searches for compatible devices on the specified network
 The network can take values in the form of:
 
 single IP address:
+
 ```...--discover --ip 192.168.1.1```
 
 network with mask:
+
 ```...--discover --ip 192.168.1.0/255.255.255.0```
 
 network with mask length:
+
 ```...--discover --ip 192.168.1.0/24```
 
 range of IP addresses:
+
 ```...--discover --ip 192.168.1.1-192.168.1.8```
 
 ## Dependencies
+
 ### CPAN modules
-- Crypt::Mode::ECB (or ```openssl``` binary. selection will be made automatically depending on the availability of one of the options)
+- Crypt::Mode::ECB
+or ```openssl``` binary - selection will be made automatically depending on the availability of one of the options
 
 ### Perl core modules
 - IO
@@ -207,5 +213,3 @@ range of IP addresses:
 - Digest::MD5
 - Getopt::Long
 - Pod::Usage
-
-ac_nodeps.pl - is an experimental script without any perl dependencies, it uses only "standard" utilities: nc, xxd, md5sum and also openssl
