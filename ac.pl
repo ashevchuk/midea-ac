@@ -22,7 +22,7 @@ use constant {
     PORT           => 6444,
     PORT_DISCOVER  => 6445,
     RETRY          => 8,
-    TIMEOUT        => 8,
+    TIMEOUT        => 4,
     SCAN_NPROC_MAX => 4
 };
 
@@ -32,8 +32,9 @@ use constant {
 };
 
 use constant {
-    TEMP_MIN => 17,
-    TEMP_MAX => 30
+    TEMP_MIN  => 16,
+    TEMP_MAX  => 30,
+    TEMP_STEP => .5
 };
 
 use constant {
@@ -42,8 +43,9 @@ use constant {
 };
 
 use constant {
-    OPT_STR => "s",
-    OPT_INT => "i"
+    OPT_STR   => "s",
+    OPT_INT   => "i",
+    OPT_FLOAT => "f",
 };
 
 use constant {
@@ -105,7 +107,7 @@ use constant {
                 set  => sub { $_[0]->[0x0d] = $_[1] }
             },
             state => STATE_VALUE,
-            parse => sub { ( $_[0]->[0x03] & 0x7f ) },
+            parse => sub { $_[0]->[0x03] & 0x7f },
             val   => {
                 auto   => 0x66,
                 dry    => 0x65,
@@ -137,14 +139,11 @@ use constant {
             input => {
                 type => OPT_STR,
                 set =>
-
-#                  sub { $_[0]->[0x11] &= ~0x0f; $_[0]->[0x11] |= $_[1] & 0x0f }
-                  sub { $_[0]->[0x11] &= ~0x30; $_[0]->[0x11] |= $_[1] & 0x3f }
+                  sub { $_[0]->[0x11] &= ~0x0f; $_[0]->[0x11] |= $_[1] & 0x0f }
             },
             state => STATE_VALUE,
 
-            #            parse => sub { $_[0]->[0x07] & 0x0f },
-            parse => sub { $_[0]->[0x11] },
+            parse => sub { $_[0]->[0x07] & 0x0f },
             val   => {
                 off        => 0x00,
                 vertical   => 0x0c,
@@ -192,16 +191,16 @@ use constant {
         },
         temp => {
             input => {
-                type => OPT_INT,
+                type => OPT_FLOAT,
                 set  => sub {
-                    $_[0]->[0x0c] &= ~0x1f;
-                    $_[0]->[0x0c] |=
-                      ( $_[1] & 0x0f ) | ( ( $_[1] << 0x04 ) & 0x10 );
+                    $_[0]->[0x0c] &= ~0x0f;
+                    $_[0]->[0x0c] |= int( $_[1] ) & 0x0f;
+                    POSIX::ceil( $_[1] * 2 ) % 2 != 0 ? $_[0]->[0x0c] |= 0x10 : $_[0]->[0x0c] &= ~0x10;
                 }
             },
             state => STATE_VALUE,
-            parse => sub { ( $_[0]->[0x02] & 0x0f ) + 16 },
-            val   => { map { ( $_, $_ ) } ( TEMP_MIN .. TEMP_MAX ) }
+            parse => sub { ( $_[0]->[0x02] & 0x0f ) + 16.0 + ( $_[0]->[0x02] & 0x10 > OFF ? 0.5 : 0.0 ) },
+            val   => { map { ( $_, $_ ) } map { ( $_, $_ < TEMP_MAX ? $_ + TEMP_STEP : () ) } TEMP_MIN .. TEMP_MAX }
         },
         eco => {
             input => {
@@ -218,16 +217,12 @@ use constant {
         turbo => {
             input => {
                 type => OPT_STR,
-
-             #                set  => sub { $_[0]->[0x14] = $_[1] ? 0x02 : OFF }
                 set => sub {
-                    $_[1] ? $_[0]->[0x14] |= 0x02 : $_[0]->[0x14] &= ( ~0x02 );
+                    $_[1] ? $_[0]->[0x14] |= 0x02 : $_[0]->[0x14] &= ~0x02;
                 }
             },
             state => STATE_BOOLEAN,
-
-        #            parse => sub { ( $_[0]->[0x0a] & 0x02 ) > OFF ? ON : OFF },
-            parse => sub { $_[0]->[0x14] > OFF ? ON : OFF },
+            parse => sub { ( $_[0]->[0x0a] & 0x02 ) > OFF ? ON : OFF },
             val   => {
                 off => OFF,
                 on  => ON
@@ -237,12 +232,10 @@ use constant {
             input => {
                 type => OPT_STR,
                 set  => sub {
-                    $_[1] ? $_[0]->[0x14] |= 0x10 : $_[0]->[0x14] &= ( ~0x10 );
+                    $_[1] ? $_[0]->[0x14] |= 0x10 : $_[0]->[0x14] &= ~0x10;
                 }
             },
             state => STATE_BOOLEAN,
-
-        #            parse => sub { ( $_[0]->[0x14] & 0x10 ) > OFF ? ON : OFF },
             parse => sub { ( $_[0]->[0x0a] & 0x10 ) > OFF ? ON : OFF },
             val   => {
                 off => OFF,
@@ -253,12 +246,10 @@ use constant {
             input => {
                 type => OPT_STR,
                 set  => sub {
-                    $_[1] ? $_[0]->[0x14] |= 0x04 : $_[0]->[0x14] &= ( ~0x04 );
+                    $_[1] ? $_[0]->[0x14] |= 0x04 : $_[0]->[0x14] &= ~0x04;
                 }
             },
             state => STATE_BOOLEAN,
-
-        #            parse => sub { ( $_[0]->[0x14] & 0x04 ) > OFF ? ON : OFF },
             parse => sub { ( $_[0]->[0x09] & 0x80 ) > OFF ? ON : OFF },
             val   => {
                 "C" => OFF,
@@ -900,7 +891,7 @@ Pod::Usage::pod2usage(2)
             sprintf(
 qq(Invaid %s value: "%s". It can take one of the following values: [%s]),
                 $item,    $option->{$item},
-                join "|", keys %{ SETTINGS->{$item}->{val} }
+                join "|", sort keys %{ SETTINGS->{$item}->{val} }
             )
           )
     } grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
@@ -1019,7 +1010,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --discover        searches for compatible devices
 
    --power           turn power state: [on|off]
-   --temp            set target temperature: [17..30]
+   --temp            set target temperature: [16..30]
    --mode            set operational mode: [auto|cool|dry|heat|fan]
    --fan             set fan speed: [auto|high|medium|low|silent]
    --turbo           turn turbo mode: [on|off]
@@ -1097,7 +1088,7 @@ It can take one of the following values: [on|off]
 
 The parameter controls the target temperature that the device will try to reach
 
-It can take positive integer values from this range: [17..30]
+It can take positive integer values from this range: [16..30]
 
 =item B<--mode>
 
