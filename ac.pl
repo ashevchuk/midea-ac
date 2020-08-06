@@ -114,7 +114,10 @@ use constant {
                 high   => 0x50,
                 medium => 0x3c,
                 low    => 0x28,
-                silent => 0x14
+                silent => 0x14,
+                range_high   => 0x64,
+                range_low    => 0x32,
+                range_middle => 0x50
             }
         },
         mode => {
