@@ -234,14 +234,14 @@ use constant {
             input => {
                 type => OPT_STR,
                 set => sub {
-                    $_[1] ? $_[0]->[0x14] |= 0x02 : $_[0]->[0x14] &= ~0x02;
+                    $_[0]->[0x12] = $_[1]
                 }
             },
             state => STATE_BOOLEAN,
-            parse => sub { ( $_[0]->[0x0a] & 0x02 ) > OFF ? ON : OFF },
+            parse => sub { $_[0]->[0x08] },
             val   => {
                 off => OFF,
-                on  => ON
+                on  => 0x20
             }
         },
         led => {
@@ -262,11 +262,12 @@ use constant {
             input => {
                 type => OPT_STR,
                 set  => sub {
-                    $_[1] ? $_[0]->[0x14] |= 0x04 : $_[0]->[0x14] &= ~0x04;
+                    $_[0]->[0x14] &= ~0x04;
+                    $_[0]->[0x14] |= ( $_[1] << 0x02 ) & 0x04;
                 }
             },
             state => STATE_BOOLEAN,
-            parse => sub { ( $_[0]->[0x09] & 0x80 ) > OFF ? ON : OFF },
+            parse => sub { ( $_[0]->[0x0a] & 0x04 ) >> 0x02 },
             val   => {
                 "C" => OFF,
                 "F" => ON
