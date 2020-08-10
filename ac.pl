@@ -59,6 +59,19 @@ use constant {
 };
 
 use constant {
+    WIND_SPEED => {
+        AUTO       => 0x66,
+        FIXED      => 0x65,
+        HIGH       => 0x50,
+        LOW        => 0x28,
+        MIDDLE     => 0x3c,
+        MUTE       => 0x14,
+        RANGE_HIGH => 0x64,
+        RANGE_LOW  => 0x32
+    }
+};
+
+use constant {
     DELIMITER => "\n",
     SEPARATOR => ":",
     EMPTY_STR => "",
@@ -109,15 +122,15 @@ use constant {
             state => STATE_VALUE,
             parse => sub { $_[0]->[0x03] & 0x7f },
             val   => {
-                auto   => 0x66,
-                dry    => 0x65,
-                high   => 0x50,
-                medium => 0x3c,
-                low    => 0x28,
-                silent => 0x14,
-                range_high   => 0x64,
-                range_low    => 0x32,
-                range_middle => 0x50
+                auto       => WIND_SPEED->{AUTO},
+                fixed      => WIND_SPEED->{FIXED},
+                range_high => WIND_SPEED->{RANGE_HIGH},
+                high       => WIND_SPEED->{HIGH},
+                middle     => WIND_SPEED->{MIDDLE},
+                range_low  => WIND_SPEED->{RANGE_LOW},
+                low        => WIND_SPEED->{LOW},
+                mute       => WIND_SPEED->{MUTE},
+                map { ( $_ < 20 or $_ % 10 ) ? ( "range_" . $_ => $_ ) : () } 1 .. 99
             }
         },
         mode => {
@@ -142,16 +155,16 @@ use constant {
             input => {
                 type => OPT_STR,
                 set =>
-                  sub { $_[0]->[0x11] &= ~0x0f; $_[0]->[0x11] |= $_[1] & 0x0f }
+                  sub { $_[0]->[0x11] = $_[1] }
             },
             state => STATE_VALUE,
 
-            parse => sub { $_[0]->[0x07] & 0x0f },
+            parse => sub { $_[0]->[0x07] },
             val   => {
                 off        => 0x00,
-                vertical   => 0x0c,
-                horizontal => 0x03,
-                both       => 0x0f
+                vertical   => 0x3c,
+                horizontal => 0x33,
+                both       => 0x3f
             }
         },
         power => {
