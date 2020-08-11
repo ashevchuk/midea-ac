@@ -900,7 +900,7 @@ Pod::Usage::pod2usage(2)
         (
             exists( $option->{$item} ) and exists( SETTINGS->{$item} )
               and (
-                not scalar grep { lc $option->{$item} eq $_ }
+                not scalar grep { $option->{$item} eq $_ }
                 keys %{ SETTINGS->{$item}->{val} }
               )
           )
