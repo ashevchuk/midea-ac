@@ -199,6 +199,10 @@ range of IP addresses:
 
 ```...--discover --ip 192.168.1.1-192.168.1.8```
 
+For fast UDP broadcast searches, use the following parameters and their values:
+
+```...--discover --ip 255.255.255.255```
+
 ## Dependencies
 
 ### CPAN modules

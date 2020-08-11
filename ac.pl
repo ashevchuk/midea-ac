@@ -19,11 +19,15 @@ use IO::Socket ();
 use IO::Handle ();
 
 use constant {
-    PORT           => 6444,
-    PORT_DISCOVER  => 6445,
     RETRY          => 8,
     TIMEOUT        => 4,
     SCAN_NPROC_MAX => 4
+};
+
+use constant {
+    PORT           => 6444,
+    PORT_DISCOVER  => 6445,
+    ADDR_DISCOVER => '255.255.255.255'
 };
 
 use constant {
@@ -648,6 +652,25 @@ sub settings {
     };
 }
 
+sub discover_response {
+    my ( $data ) = @_;
+    if (   ( $data->[0x00] == 0x5a and $data->[0x01] == 0x5a )
+        or ( $data->[0x08] == 0x5a and $data->[0x0a] == 0x5a ) )
+    {
+        $data = [ @{$data}[ 0x08 .. $#$data - 16 ] ]
+          if $data->[0x08] == 0x5a and $data->[0x0a] == 0x5a;
+
+        $data = decrypt( [ @{$data}[ 0x28 .. $#$data ] ] );
+
+        $data = [ @{$data}[ 0x00 .. $#$data - $data->[-1] ] ];
+
+        return {
+          id => deflate ( [ @{$data}[ 0x29 .. 0x33 ] ] ),
+          sn => deflate ( [ @{$data}[ 0x0e .. 0x23 ] ] )
+        };
+    }
+}
+
 sub net_request {
     my ( $device_ip, $data ) = @_;
 
@@ -656,6 +679,7 @@ sub net_request {
         Type     => IO::Socket::SOCK_STREAM,
         Proto    => 'tcp',
         Timeout  => TIMEOUT,
+        ReusePort => 1,
         PeerPort => PORT,
         PeerHost => $device_ip
     ) or die "Socket error: $@";
@@ -672,6 +696,104 @@ sub net_request {
     die "no response" unless $len;
 
     return [ @{ inflate $buffer}[ 0x28 .. ( ( $len == 0x58 ) ? 0x47 : 0x57 ) ] ];
+}
+
+sub net_port_check {
+    my $client = IO::Socket->new(
+        Domain   => IO::Socket::AF_INET,
+        Type     => IO::Socket::SOCK_STREAM,
+        Proto    => 'tcp',
+        Timeout  => POSIX::ceil( TIMEOUT / 2 ),
+        ReusePort => 1,
+        PeerHost => $_[0],
+        PeerPort => $_[1],
+    ) or return undef;
+
+    $client->close();
+
+    return 1;
+}
+
+sub net_discover {
+    if ( net_port_check( $_[0], PORT ) ) {
+
+        my $client = IO::Socket->new(
+            Domain    => IO::Socket::AF_INET,
+            Type      => IO::Socket::SOCK_DGRAM,
+            Proto     => 'udp',
+            Timeout   => TIMEOUT,
+            ReusePort => 1,
+            PeerHost  => $_[0],
+            PeerPort  => PORT_DISCOVER,
+        ) or die "Socket error: $@";
+
+        $client->send(deflate discover_packet());
+
+        $client->recv( my $buffer, RESPONSE_LEN );
+
+        $client->close();
+
+        if ( length($buffer) ) {
+            if ( my $data = discover_response( inflate $buffer ) ) {
+                return {
+                  address => $_[0],
+                  %{ $data }
+                }
+            }
+        }
+
+    }
+
+    return undef;
+}
+
+sub net_discover_broadcast {
+    my $found = [];
+
+    my $client = IO::Socket->new(
+        Domain    => IO::Socket::AF_INET,
+        Type      => IO::Socket::SOCK_DGRAM,
+        Proto     => 'udp',
+        Timeout   => TIMEOUT * 2,
+        ReusePort => 1,
+        Broadcast => 1,
+    ) or die "Socket error: $@";
+
+    $client->send( deflate( discover_packet() ), 0, Socket::pack_sockaddr_in( PORT_DISCOVER, Socket::inet_aton( ADDR_DISCOVER ) ) );
+
+    for (;;) {
+        my ($buffer, $peer);
+
+        eval {
+            local $SIG{ALRM} = sub { die "timeout" };
+            alarm TIMEOUT;
+            $peer = $client->recv( $buffer, RESPONSE_LEN, 0 );
+            alarm 0;
+        };
+
+        alarm 0;
+
+        last if $@;
+
+        if ( defined( $peer ) and length( $buffer ) ) {
+            my $addr = Socket::inet_ntoa((Socket::unpack_sockaddr_in($peer))[1]);
+
+            next if grep { $_->{address} eq $addr } @{ $found };
+
+            my $data = inflate $buffer;
+
+            if ( my $data = discover_response( inflate $buffer ) ) {
+                push @{ $found }, {
+                  address => $addr,
+                  %{ $data }
+                }
+            }
+        }
+    }
+
+    $client->close();
+
+    return $found;
 }
 
 sub send_request {
@@ -704,71 +826,11 @@ sub fetch {
     return request( $_[0], status_packet() );
 }
 
-sub net_port_check {
-    my $client = IO::Socket->new(
-        Domain   => IO::Socket::AF_INET,
-        Type     => IO::Socket::SOCK_STREAM,
-        Proto    => 'tcp',
-        Timeout  => POSIX::ceil( TIMEOUT / 2 ),
-        PeerHost => $_[0],
-        PeerPort => $_[1],
-    ) or return undef;
-
-    $client->close();
-
-    return 1;
-}
-
-sub net_discover {
-    if ( net_port_check( $_[0], PORT ) ) {
-
-        my $client = IO::Socket->new(
-            Domain    => IO::Socket::AF_INET,
-            Type      => IO::Socket::SOCK_DGRAM,
-            Proto     => 'udp',
-            Timeout   => TIMEOUT,
-            ReusePort => 1,
-            Broadcast => 1,
-            PeerHost  => $_[0],
-            PeerPort  => PORT_DISCOVER,
-            LocalPort => PORT_DISCOVER
-        ) or die "Socket error: $@";
-
-        $client->send(deflate discover_packet());
-
-        $client->recv( my $buffer, RESPONSE_LEN );
-
-        $client->close();
-
-        if ( length($buffer) ) {
-
-            my $data = inflate $buffer;
-
-            if (   ( $data->[0x00] == 0x5a and $data->[0x01] == 0x5a )
-                or ( $data->[0x08] == 0x5a and $data->[0x0a] == 0x5a ) )
-            {
-                $data = [ @{$data}[ 0x08 .. $#$data - 16 ] ]
-                  if $data->[0x08] == 0x5a and $data->[0x0a] == 0x5a;
-
-                $data = decrypt( [ @{$data}[ 0x28 .. $#$data ] ] );
-
-                $data = [ @{$data}[ 0x00 .. $#$data - $data->[-1] ] ];
-
-                return {
-                  address => $_[0],
-                  id => deflate ( [ @{$data}[ 0x29 .. 0x33 ] ] ),
-                  sn => deflate ( [ @{$data}[ 0x0e .. 0x23 ] ] )
-                };
-            }
-        }
-
-    }
-
-    return undef;
-}
-
 sub scan {
     my ( $ip_address, $progress_cb ) = @_;
+
+    return net_discover_broadcast() if $ip_address eq "255.255.255.255";
+
     my $net_address_list = parse_net_addr($ip_address);
     my $net_address      = shift @{$net_address_list};
 
@@ -1043,7 +1105,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --separator       field separator [default: ":"]
    --delimiter       fields delimiter [default: "\n"]
 
-   --exit            exit code 0 if value ON, else exit code 1 [eco|led|error|turbo|buzzer|unit|power]
+   --exit            exit code 0 if value ON, else exit code 1 [eco|led|error|turbo|buzzer|power]
 
 =head1 OPTIONS
 
@@ -1204,6 +1266,10 @@ network with mask length:
 range of IP addresses:
 
 ...--discover --ip 192.168.1.1-192.168.1.8
+
+For fast UDP broadcast searches, use the following parameters and their values:
+
+...--discover --ip 255.255.255.255
 
 =item B<--exit>
 
