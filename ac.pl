@@ -112,7 +112,7 @@ use constant {
     ]
 };
 
-use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' };
+use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' }; # hardcoded in libEncodeAndDecodeUtils.so
 
 use constant { KEY => Digest::MD5::md5(KEY_SIGN) };    # 6a92ef406bad2f0359baad994171ea6d
 
