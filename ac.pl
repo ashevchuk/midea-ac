@@ -334,12 +334,13 @@ use constant {
 };
 
 use constant {
-    map {
+    SELF_BIN => $0,
+    (map {
         map {
             my $sub = uc($_) . '_BIN';
             defined *{"main::${sub}"} ? () : ( $sub => $_ )
         } @{ ALTERNATIVES->{$_}->{bins} }
-    } keys %{ +ALTERNATIVES }
+    } keys %{ +ALTERNATIVES } )
 };
 
 sub ahex {
@@ -352,52 +353,54 @@ sub ahex {
     }
 }
 
-sub module_installed ($) {
+sub module_installed {
     return eval { require File::Spec->catfile( split( /:{2}/, $_[0] ) ) . '.pm' };
 }
 
-sub which ($) {
+sub which {
     return grep { -f and -x } map { File::Spec->catfile( $_, $_[0] ) } split /:/, $ENV{PATH};
 }
 
-sub inflate ($) {
+sub inflate {
     return [ map { ord } split //, $_[0] ];
 }
 
-sub deflate (+@) {
+sub deflate {
     return join EMPTY_STR, map { defined($_) ? chr($_) : 0x00 } @{ $_[0] };
 }
 
-sub encrypt ($) {
+sub encrypt {
     return inflate( Crypt::Mode::ECB->new( AES => 0 )->encrypt( deflate( $_[0] ), KEY ) );
 }
 
-sub decrypt ($) {
+sub decrypt {
     return inflate( Crypt::Mode::ECB->new( AES => 0 )->decrypt( deflate( $_[0] ), KEY ) );
 }
 
-sub encrypt_openssl ($) {
+sub encrypt_openssl {
     my $cmd = join SPACE_STR, ECHO_BIN(), qw(-n), ahex( $_[0] ), qw(|), XXD_BIN(),
       qw(-r -p |), OPENSSL_BIN(), qw(enc -e -nopad -aes-128-ecb -K), ahex(KEY),
       qw(-in - -out - |), XXD_BIN(), qw(-p);
     return inflate pack( "H*", join EMPTY_STR, split /\n/, qx($cmd) );
 }
 
-sub decrypt_openssl ($) {
+sub decrypt_openssl {
     my $cmd = join SPACE_STR, ECHO_BIN(), qw(-n), ahex( $_[0] ), qw(|), XXD_BIN(),
       qw(-r -p |), OPENSSL_BIN(), qw(enc -d -nopad -aes-128-ecb -K), ahex(KEY),
       qw(-in - -out - |), XXD_BIN(), qw(-p);
     return inflate pack( "H*", join EMPTY_STR, split /\n/, qx($cmd) );
 }
 
-sub crc8 (+@) {
+sub crc8 {
     my $crc = 0;
     $crc = CRC8_TABLE->[ $crc ^ $_ ] for @{ $_[0] };
     return $crc;
 }
 
-sub unescape ($) {
-    return $_[0] ? $_[0] =~ s{(\A|\G|[^\\])[\\]([0]\d\d|[x][\da-fA-F]{2}|.)}{$1.(ESCAPES->{lc $2})}sgerx : EMPTY_STR;
+sub unescape {
+    my $str = shift // EMPTY_STR;
+    $str =~ s{(\A|\G|[^\\])[\\]([0]\d\d|[x][\da-fA-F]{2}|.)}{$1.(ESCAPES->{lc $2})}sgex;
+    return $str;
 }
 
 sub quote {
@@ -411,7 +414,7 @@ sub quote {
       : EMPTY_STR;
 }
 
-sub aton ($$) {
+sub aton {
     my $mask = 0;
 
     if ( $_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$} ) {
@@ -445,11 +448,11 @@ sub aton ($$) {
     return undef;
 }
 
-sub ntoa ($) {
+sub ntoa {
     return join ".", unpack( "CCCC", pack( "N", $_[0] ) );
 }
 
-sub parse_net ($) {
+sub parse_net {
     my $result = {};
 
     if ( $_[0] =~ m{^(.+?)\/(.+)$} ) {
