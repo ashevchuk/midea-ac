@@ -158,17 +158,20 @@ use constant {
         swing => {
             input => {
                 type => OPT_STR,
-                set =>
-                  sub { $_[0]->[0x11] = $_[1] }
+                set  => sub {
+                    $_[0]->[0x11] |= 0x30;
+                    $_[0]->[0x11] &= ~0x0f;
+                    $_[0]->[0x11] |= $_[1];
+                }
             },
             state => STATE_VALUE,
 
-            parse => sub { $_[0]->[0x07] },
+            parse => sub { $_[0]->[0x07] & 0x0f },
             val   => {
                 off        => 0x00,
-                vertical   => 0x3c,
-                horizontal => 0x33,
-                both       => 0x3f
+                vertical   => 0x0c,
+                horizontal => 0x03,
+                both       => 0x0f
             }
         },
         power => {
