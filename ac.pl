@@ -241,14 +241,15 @@ use constant {
             input => {
                 type => OPT_STR,
                 set => sub {
-                    $_[0]->[0x12] = $_[1]
+                    $_[0]->[0x12] &= ~0x20;
+                    $_[0]->[0x12] |= 0x20 if $_[1];
                 }
             },
             state => STATE_BOOLEAN,
-            parse => sub { $_[0]->[0x08] },
+            parse => sub { ( $_[0]->[0x08] & 0x20 ) > OFF ? ON : OFF },
             val   => {
                 off => OFF,
-                on  => 0x20
+                on  => ON
             }
         },
         led => {
