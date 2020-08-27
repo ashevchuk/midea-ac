@@ -242,11 +242,11 @@ use constant {
                 type => OPT_STR,
                 set => sub {
                     $_[0]->[0x12] &= ~0x20;
-                    $_[0]->[0x12] |= 0x20 if $_[1];
+                    $_[0]->[0x12] |= ( $_[1] << 0x05 ) & 0x20;
                 }
             },
             state => STATE_BOOLEAN,
-            parse => sub { ( $_[0]->[0x08] & 0x20 ) > OFF ? ON : OFF },
+            parse => sub { ( ( ( $_[0]->[0x08] & 0x20 ) >> 0x05 == OFF ) ? ( ( $_[0]->[0x0a] & 0x02 ) >> 0x01 ) : ( ( $_[0]->[0x08] & 0x20 ) >> 0x05 )) > OFF ? ON : OFF },
             val   => {
                 off => OFF,
                 on  => ON
