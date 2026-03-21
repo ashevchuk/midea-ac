@@ -7,7 +7,7 @@ Potentially compatible with other brands sharing the same M-Smart V3 protocol (E
 ## Requirements
 
 - Perl 5.10+
-- Standard core modules only: `Digest::MD5`, `IO::Socket`, `Socket`, `POSIX`, `List::Util`
+- Standard core modules only: `IO::Socket`, `Socket`, `POSIX`, `List::Util`
 
 ## Usage
 

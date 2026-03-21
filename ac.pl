@@ -8,15 +8,13 @@ use utf8;
 use Pod::Usage   ();
 use Getopt::Long ();
 
-use POSIX ();
+use POSIX        ();
 
-use List::Util  ();
-use Digest::MD5 ();
-use File::Spec  ();
+use List::Util   ();
 
-use Socket     ();
-use IO::Socket ();
-use IO::Handle ();
+use Socket       ();
+use IO::Socket   ();
+use IO::Handle   ();
 
 use constant {
     RETRY          => 8,
@@ -112,9 +110,10 @@ use constant {
     ]
 };
 
-use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' }; # hardcoded in libEncodeAndDecodeUtils.so
 
-use constant { KEY => Digest::MD5::md5(KEY_SIGN) };    # 6a92ef406bad2f0359baad994171ea6d
+use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' }; # hardcoded in libEncodeAndDecodeUtils.so
+#use constant { KEY => md5(KEY_SIGN) }; # 6a92ef406bad2f0359baad994171ea6d
+use constant { KEY => "6a92ef406bad2f0359baad994171ea6d" }; # precomputed md5(KEY_SIGN): 6a92ef406bad2f0359baad994171ea6d
 
 use constant {
     SETTINGS => {
@@ -555,7 +554,7 @@ sub dbg {
             $a ^= 0x1b if $h;
             $b >>= 1;
         }
-        $r;
+        return $r;
     }
 
     # AES-128 key expansion → 44 32-bit words
@@ -574,7 +573,7 @@ sub dbg {
             }
             $w[$i] = ( $w[$i-4] ^ $t ) & 0xffffffff;
         }
-        \@w;
+        return \@w;
     }
 
     # AddRoundKey: state is column-major 16 bytes (s[r + 4*c])
@@ -607,12 +606,13 @@ sub dbg {
             }
             _add_rk( \@s, $w, $rnd );
         }
+
         $s[$_] = $S[$s[$_]] for 0 .. 15;
         @s[1,5,9,13]  = @s[5,9,13,1];
         @s[2,6,10,14] = @s[10,14,2,6];
         @s[3,7,11,15] = @s[15,3,7,11];
         _add_rk( \@s, $w, 10 );
-        \@s;
+        return \@s;
     }
 
     sub _dec_block {
@@ -633,12 +633,13 @@ sub dbg {
                 $s[$c*4+3] = _mul(11,$a) ^ _mul(13,$b) ^ _mul( 9,$cc) ^ _mul(14,$d);
             }
         }
+
         @s[1,5,9,13]  = @s[13,1,5,9];
         @s[2,6,10,14] = @s[10,14,2,6];
         @s[3,7,11,15] = @s[7,11,15,3];
         $s[$_] = $Si[$s[$_]] for 0 .. 15;
         _add_rk( \@s, $w, 0 );
-        \@s;
+        return \@s;
     }
 
     sub encrypt_ecb {
@@ -646,9 +647,8 @@ sub dbg {
         my @b = unpack( 'C*', $data );
         my $w = _key_expand($key);
         my $out = '';
-        $out .= pack( 'C*', @{ _enc_block( [@b[$_*16 .. $_*16+15]], $w ) } )
-            for 0 .. $#b / 16;
-        $out;
+        $out .= pack( 'C*', @{ _enc_block( [@b[$_*16 .. $_*16+15]], $w ) } ) for 0 .. $#b / 16;
+        return $out;
     }
 
     sub decrypt_ecb {
@@ -656,12 +656,38 @@ sub dbg {
         my @b = unpack( 'C*', $data );
         my $w = _key_expand($key);
         my $out = '';
-        $out .= pack( 'C*', @{ _dec_block( [@b[$_*16 .. $_*16+15]], $w ) } )
-            for 0 .. $#b / 16;
-        $out;
+        $out .= pack( 'C*', @{ _dec_block( [@b[$_*16 .. $_*16+15]], $w ) } ) for 0 .. $#b / 16;
+        return $out;
     }
 
     1;
+}
+
+sub md5 {
+    my ($msg) = $_[0];
+    my ($a, $b, $c, $d) = (0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476);
+    use feature 'state';
+    state @T = map { int(4294967296 * abs(sin($_ + 1))) } 0 .. 63;
+    state @S = ( (7,12,17,22) x 4, (5, 9,14,20) x 4, (4,11,16,23) x 4, (6,10,15,21) x 4 );
+    my $msg_len = length($msg);
+    $msg .= pack("C", 0x80);
+    $msg .= pack("C", 0) while ( length($msg) % 64 != 56 );
+    $msg .= pack("V2", $msg_len * 8, 0);
+    my $rotl = sub { my ($x, $n) = @_; $x &= 0xffffffff; (($x << $n) | ($x >> (32 - $n))) & 0xffffffff; };
+    for (my $i = 0; $i < length($msg); $i += 64) {
+        my @M = unpack('V16', substr($msg, $i, 64));
+        my ($A, $B, $C, $D) = ($a, $b, $c, $d);
+        for my $j ( 0 .. 63 ) {
+            my ( $F, $g );
+            if ( $j < 16 ) { $F = ($B & $C) | ((~$B & 0xffffffff) & $D); $g = $j; }
+            elsif ( $j < 32 ) { $F = ($D & $B) | ((~$D & 0xffffffff) & $C); $g = (5 * $j + 1) % 16; }
+            elsif ( $j < 48 ) { $F = $B ^ $C ^ $D; $g = (3 * $j + 5) % 16; }
+            else { $F = $C ^ ($B | (~$D & 0xffffffff)); $g = (7 * $j) % 16; }
+            $F = ($F + $A + $T[$j] + $M[$g]) & 0xffffffff; $A = $D; $D = $C; $C = $B; $B = ($B + $rotl->($F, $S[$j])) & 0xffffffff;
+        }
+        $a = ($a + $A) & 0xffffffff; $b = ($b + $B) & 0xffffffff; $c = ($c + $C) & 0xffffffff; $d = ($d + $D) & 0xffffffff;
+    }
+    return pack("V4", $a, $b, $c, $d);
 }
 
 sub inflate {
@@ -673,11 +699,11 @@ sub deflate {
 }
 
 sub encrypt {
-    return inflate( PureAES::encrypt_ecb( deflate( $_[0] ), KEY ) );
+    return inflate( PureAES::encrypt_ecb( deflate( $_[0] ), pack("H*", KEY) ) );
 }
 
 sub decrypt {
-    return inflate( PureAES::decrypt_ecb( deflate( $_[0] ), KEY ) );
+    return inflate( PureAES::decrypt_ecb( deflate( $_[0] ), pack("H*", KEY) ) );
 }
 
 sub crc8 {
@@ -846,7 +872,7 @@ sub packet {
 
     $packet->[0x04] = scalar( @{$packet} ) + BLOCK_LEN;
 
-    push @{$packet}, @{ inflate Digest::MD5::md5( deflate($packet) . KEY_SIGN ) };
+    push @{$packet}, @{ inflate md5( deflate($packet) . KEY_SIGN ) };
 
     return $packet;
 }
