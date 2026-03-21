@@ -205,10 +205,6 @@ For fast UDP broadcast searches, use the following parameters and their values:
 
 ## Dependencies
 
-### CPAN modules
-- Crypt::Mode::ECB
-or ```openssl``` binary - selection will be made automatically depending on the availability of one of the options
-
 ### Perl core modules
 - IO
 - POSIX
