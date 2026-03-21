@@ -68,7 +68,7 @@ use constant {
         FIXED      => 0x65,
         HIGH       => 0x50,
         LOW        => 0x28,
-        MIDDLE     => 0x3c,
+        MEDIUM     => 0x3c,
         MUTE       => 0x14,
         RANGE_HIGH => 0x64,
         RANGE_LOW  => 0x32
@@ -130,7 +130,7 @@ use constant {
                 fixed      => WIND_SPEED->{FIXED},
                 range_high => WIND_SPEED->{RANGE_HIGH},
                 high       => WIND_SPEED->{HIGH},
-                middle     => WIND_SPEED->{MIDDLE},
+                medium     => WIND_SPEED->{MEDIUM},
                 range_low  => WIND_SPEED->{RANGE_LOW},
                 low        => WIND_SPEED->{LOW},
                 mute       => WIND_SPEED->{MUTE},
