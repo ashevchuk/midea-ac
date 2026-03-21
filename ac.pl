@@ -228,7 +228,7 @@ use constant {
         eco => {
             input => {
                 type => OPT_STR,
-                set  => sub { $_[0]->[0x13] = $_[1] ? 0xff : OFF }
+                set  => sub { $_[0]->[0x13] &= ~0x80; $_[0]->[0x13] |= $_[1] ? 0x80 : OFF }
             },
             state => STATE_BOOLEAN,
             parse => sub { ( $_[0]->[0x09] & 0x10 ) > OFF ? ON : OFF },
@@ -243,6 +243,8 @@ use constant {
                 set => sub {
                     $_[0]->[0x12] &= ~0x20;
                     $_[0]->[0x12] |= ( $_[1] << 0x05 ) & 0x20;
+                    $_[0]->[0x14] &= ~0x02;
+                    $_[0]->[0x14] |= ( $_[1] << 0x01 ) & 0x02;
                 }
             },
             state => STATE_BOOLEAN,
@@ -279,6 +281,21 @@ use constant {
             val   => {
                 "C" => OFF,
                 "F" => ON
+            }
+        },
+        sleep => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x14] &= ~0x01;
+                    $_[0]->[0x14] |= $_[1] ? 0x01 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x0a] & 0x01 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
             }
         },
         temp_int => {
@@ -346,6 +363,16 @@ use constant {
         } @{ ALTERNATIVES->{$_}->{bins} }
     } keys %{ +ALTERNATIVES } )
 };
+
+our $DEBUG = 0;
+
+sub dbg {
+    return unless $DEBUG;
+    my ( $label, $data ) = @_;
+    use feature 'state';
+    state $i = 0;
+    printf STDERR "[DUBUG %03d]%-10s (%3d bytes):%s\n", $i++, $label, scalar( @{$data} ), ahex($data);
+}
 
 sub ahex {
     my ($item) = @_;
@@ -526,6 +553,8 @@ sub set_cmd {
     $data->[0x01] = 0x23;
     $data->[0x09] = 0x02;
     $data->[0x0a] = 0x40;
+    $data->[0x08] = 0x03;          # protocol v3 for write commands (DataBodyDevOld updateProtocol)
+    $data->[0x0b] = 0x02 | 0x40;  # body[1] base = 0x42 (remoteControlCode + keyStatus, from SwitchBean defaults)
     push @{$data}, (0x00) x 3;
 
     for ( keys %{$settings} ) {
@@ -580,7 +609,7 @@ sub device_settings {
     my ($data) = @_;
 
     die "unknown response: " . _hex($data)
-      unless defined $data->[0x0a] and $data->[0x0a] == 0xc0;
+      unless defined $data->[0x0a] and ($data->[0x0a] == 0xc0 or $data->[0x0a] == 0xc1);
 
     my $body = [ @{$data}[ 0x0a .. $#$data ] ];
 
@@ -681,6 +710,8 @@ sub discover_response {
 sub net_request {
     my ( $device_ip, $data ) = @_;
 
+    dbg( ">> TX", $data );
+
     my $client = IO::Socket->new(
         Domain   => IO::Socket::AF_INET,
         Type     => IO::Socket::SOCK_STREAM,
@@ -702,7 +733,13 @@ sub net_request {
 
     die "no response" unless $len;
 
-    return [ @{ inflate $buffer}[ 0x28 .. ( ( $len == 0x58 ) ? 0x47 : 0x57 ) ] ];
+    my $raw = inflate $buffer;
+    dbg( "<< RX", $raw );
+
+    my $enc = [ @{$raw}[ 0x28 .. ( ( $len == 0x58 ) ? 0x47 : 0x57 ) ] ];
+    dbg( "<< RX/enc", $enc );
+
+    return $enc;
 }
 
 sub net_port_check {
@@ -734,13 +771,16 @@ sub net_discover {
             PeerPort  => PORT_DISCOVER,
         ) or die "Socket error: $@";
 
-        $client->send(deflate discover_packet());
+        my $dpkt = discover_packet();
+        dbg( ">> DISC TX", $dpkt );
+        $client->send(deflate $dpkt);
 
         $client->recv( my $buffer, RESPONSE_LEN );
 
         $client->close();
 
         if ( length($buffer) ) {
+            dbg( "<< DISC RX", inflate $buffer );
             if ( my $data = discover_response( inflate $buffer ) ) {
                 return {
                   address => $_[0],
@@ -766,7 +806,9 @@ sub net_discover_broadcast {
         Broadcast => 1,
     ) or die "Socket error: $@";
 
-    $client->send( deflate( discover_packet() ), 0, Socket::pack_sockaddr_in( PORT_DISCOVER, Socket::inet_aton( ADDR_DISCOVER ) ) );
+    my $bpkt = discover_packet();
+    dbg( ">> BCAST TX", $bpkt );
+    $client->send( deflate($bpkt), 0, Socket::pack_sockaddr_in( PORT_DISCOVER, Socket::inet_aton( ADDR_DISCOVER ) ) );
 
     for (;;) {
         my ($buffer, $peer);
@@ -787,7 +829,7 @@ sub net_discover_broadcast {
 
             next if grep { $_->{address} eq $addr } @{ $found };
 
-            my $data = inflate $buffer;
+            dbg( "<< BCAST RX", inflate $buffer );
 
             if ( my $data = discover_response( inflate $buffer ) ) {
                 push @{ $found }, {
@@ -806,7 +848,10 @@ sub net_discover_broadcast {
 sub send_request {
     my ( $device_ip, $data ) = @_;
     my $response = decrypt( net_request( $device_ip, $data ) );
-    return [ @{$response}[ 0x00 .. $#$response - $response->[-1] ] ];
+    dbg( "<< RX/dec", $response );
+    my $unpadded = [ @{$response}[ 0x00 .. $#$response - $response->[-1] ] ];
+    dbg( "<< RX/cmd", $unpadded );
+    return $unpadded;
 }
 
 sub request {
@@ -836,7 +881,7 @@ sub fetch {
 sub scan {
     my ( $ip_address, $progress_cb ) = @_;
 
-    return net_discover_broadcast() if $ip_address eq "255.255.255.255";
+    return net_discover_broadcast() if $ip_address eq ADDR_DISCOVER;
 
     my $net_address_list = parse_net_addr($ip_address);
     my $net_address      = shift @{$net_address_list};
@@ -937,6 +982,7 @@ Getopt::Long::GetOptions(
     $option,
     qw[
       help
+      debug
       set
       get
       value
@@ -955,6 +1001,8 @@ Getopt::Long::GetOptions(
 );
 
 Pod::Usage::pod2usage(1) if exists $option->{help};
+
+$DEBUG = 1 if exists $option->{debug};
 
 Pod::Usage::pod2usage(2)
   if ( not( exists $option->{ip} ) )
@@ -1087,6 +1135,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
 
  Options:
    --help            brief help message
+   --debug           print raw packets to stderr
 
    --ip              device IP address or host name
 
@@ -1102,6 +1151,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --turbo           turn turbo mode: [on|off]
    --swing           set swing mode: [off|vertical|horizontal|both]
    --eco             turn eco mode: [on|off]
+   --sleep           turn sleep mode: [on|off]
    --buzzer          turn audible feedback: [on|off]
 
    --value           output of values alone
@@ -1112,7 +1162,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --separator       field separator [default: ":"]
    --delimiter       fields delimiter [default: "\n"]
 
-   --exit            exit code 0 if value ON, else exit code 1 [eco|led|error|turbo|buzzer|power]
+   --exit            exit code 0 if value ON, else exit code 1 [eco|led|error|turbo|sleep|buzzer|power]
 
 =head1 OPTIONS
 
@@ -1203,6 +1253,12 @@ It can take one of the following values: [off|vertical|horizontal|both]
 =item B<--eco>
 
 The parameter controls the eco mode of the device
+
+It can take one of the following values: [on|off]
+
+=item B<--sleep>
+
+The parameter controls the sleep mode of the device
 
 It can take one of the following values: [on|off]
 
