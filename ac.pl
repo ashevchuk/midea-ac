@@ -342,10 +342,7 @@ use constant {
 
 use constant { CRC8_TABLE => [ CRC8_TABLE_GEN->( 8, 0x0131 ) ] };
 
-use constant { SELF_BIN => $0 };
-
 our $DEBUG = 0;
-
 
 sub ahex {
     my ($item) = @_;
