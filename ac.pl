@@ -384,6 +384,141 @@ sub ahex {
     }
 }
 
+{
+    my @_MODE  = ( 'auto', 'cool', 'dry', 'heat', 'fan' );
+    my %_FAN   = ( 20 => 'silent', 40 => 'low', 60 => 'med', 80 => 'high', 100 => 'turbo', 102 => 'auto' );
+    my %_SWING = ( 0 => 'off', 12 => 'full', 4 => 'pos1', 5 => 'pos2', 6 => 'pos3', 7 => 'pos4', 8 => 'pos5' );
+
+    sub _dline {
+        my ( $name, $fmt, @args ) = @_;
+        printf STDERR "              %-22s " . $fmt . "\n", $name, @args;
+    }
+
+    sub _dissect_outer {
+        my ($d) = @_;
+        return unless @$d >= 6;
+        printf STDERR "          --- outer packet ---\n";
+        _dline( 'magic',    '%s',    sprintf( '%02x%02x', $d->[0], $d->[1] ) );
+        _dline( 'length',   '%d',    $d->[2] | ( $d->[3] << 8 ) ) if @$d >= 4;
+        _dline( 'msg_type', '0x%02x', $d->[8] ) if @$d >= 9;
+        if ( @$d >= 10 ) {
+            _dline( 'device_id_sn', '%s', sprintf( '%02x%02x%02x%02x%02x%02x%02x%02x',
+                map { $d->[$_] } 4..11 ) );
+        }
+        _dline( 'payload_len', '%d', @$d - 36 ) if @$d > 36;
+    }
+
+    sub _dissect_cmd_body {
+        my ($d, $off) = @_;
+        $off //= 0;
+        # body relative to the AA payload start (after AA header)
+        # typical: d[0]=0xAA, d[1]=len, d[2]=dev_type, d[7]=proto, d[8]=msgtype, d[9..]=body
+        my $b = $off;  # base offset into $d for body[0]
+        printf STDERR "          --- command body ---\n";
+        _dline( 'msg_type',  '0x%02x', $d->[$b+1] );
+        return unless @$d > $b+3;
+        my $b1 = $d->[$b+2];
+        _dline( 'power',     '%s',     ($b1 & 0x01) ? 'on' : 'off' );
+        _dline( 'buzzer',    '%s',     ($b1 & 0x02) ? 'on' : 'off' );
+        return unless @$d > $b+4;
+        my $b2 = $d->[$b+3];
+        my $mode_idx = ($b2 >> 5) & 0x07;
+        _dline( 'mode',      '%s(%d)', $_MODE[$mode_idx] // '?', $mode_idx );
+        my $temp = ( ($b2 & 0x0f) + 16 ) + ( ($b2 & 0x10) ? 0.5 : 0 );
+        _dline( 'set_temp',  '%.1f C', $temp );
+        return unless @$d > $b+5;
+        my $b3 = $d->[$b+4];
+        my $fan = $b3 & 0x7f;
+        _dline( 'fan_speed', '%s(%d)', $_FAN{$fan} // 'custom', $fan );
+        return unless @$d > $b+9;
+        my $b7 = $d->[$b+8];
+        my $sw = $b7 & 0x0f;
+        _dline( 'swing',     '%s(%d)', $_SWING{$sw} // 'custom', $sw );
+        return unless @$d > $b+10;
+        my $b8 = $d->[$b+9];
+        _dline( 'feel_own',    '%s', ($b8 & 0x80) ? 'on' : 'off' );
+        _dline( 'power_saver', '%s', ($b8 & 0x40) ? 'on' : 'off' );
+        _dline( 'turbo(b8)',   '%s', ($b8 & 0x20) ? 'on' : 'off' );
+        _dline( 'low_freq_fan','%s', ($b8 & 0x10) ? 'on' : 'off' );
+        return unless @$d > $b+11;
+        my $b9 = $d->[$b+10];
+        _dline( 'eco',         '%s', ($b9 & 0x80) ? 'on' : 'off' );
+        _dline( 'dry_clean',   '%s', ($b9 & 0x04) ? 'on' : 'off' );
+        _dline( 'wise_eye',    '%s', ($b9 & 0x01) ? 'on' : 'off' );
+        return unless @$d > $b+12;
+        my $b10 = $d->[$b+11];
+        _dline( 'turbo(b10)',  '%s', ($b10 & 0x02) ? 'on' : 'off' );
+        _dline( 'sleep_func',  '%s', ($b10 & 0x01) ? 'on' : 'off' );
+        _dline( 'temp_unit',   '%s', ($b10 & 0x04) ? 'F' : 'C' );
+    }
+
+    sub _dissect_resp_body {
+        my ($d, $off) = @_;
+        $off //= 0;
+        printf STDERR "          --- response body ---\n";
+        return unless @$d > $off+2;
+        my $b1 = $d->[$off+2];
+        _dline( 'power',       '%s', ($b1 & 0x01) ? 'on' : 'off' );
+        _dline( 'buzzer',      '%s', ($b1 & 0x02) ? 'on' : 'off' );
+        return unless @$d > $off+3;
+        my $b2 = $d->[$off+3];
+        my $mode_idx = ($b2 >> 5) & 0x07;
+        _dline( 'mode',        '%s(%d)', $_MODE[$mode_idx] // '?', $mode_idx );
+        my $temp = ( ($b2 & 0x0f) + 16 ) + ( ($b2 & 0x10) ? 0.5 : 0 );
+        _dline( 'set_temp',    '%.1f C', $temp );
+        return unless @$d > $off+4;
+        my $b3 = $d->[$off+4];
+        my $fan = $b3 & 0x7f;
+        _dline( 'fan_speed',   '%s(%d)', $_FAN{$fan} // 'custom', $fan );
+        return unless @$d > $off+8;
+        my $b7 = $d->[$off+8];
+        my $sw = $b7 & 0x0f;
+        _dline( 'swing',       '%s(%d)', $_SWING{$sw} // 'custom', $sw );
+        return unless @$d > $off+9;
+        my $b8 = $d->[$off+9];
+        _dline( 'feel_own',    '%s', ($b8 & 0x80) ? 'on' : 'off' );
+        _dline( 'power_saver', '%s', ($b8 & 0x40) ? 'on' : 'off' );
+        _dline( 'turbo',       '%s', (($b8 & 0x20) || ((@$d > $off+11) && ($d->[$off+11] & 0x02))) ? 'on' : 'off' );
+        return unless @$d > $off+10;
+        my $b9 = $d->[$off+10];
+        _dline( 'eco',         '%s', ($b9 & 0x80) ? 'on' : 'off' );
+        _dline( 'dry_clean',   '%s', ($b9 & 0x04) ? 'on' : 'off' );
+        _dline( 'wise_eye',    '%s', ($b9 & 0x01) ? 'on' : 'off' );
+        return unless @$d > $off+11;
+        my $b10 = $d->[$off+11];
+        _dline( 'sleep_func',  '%s', ($b10 & 0x01) ? 'on' : 'off' );
+        _dline( 'temp_unit',   '%s', ($b10 & 0x04) ? 'F' : 'C' );
+        return unless @$d > $off+12;
+        my $ind = ($d->[$off+12] - 50) / 2;
+        _dline( 'indoor_temp', '%.1f C', $ind );
+        return unless @$d > $off+13;
+        my $out = ($d->[$off+13] - 50) / 2;
+        _dline( 'outdoor_temp','%.1f C', $out );
+    }
+
+    sub dissect_packet {
+        return unless $DEBUG;
+        my ($d, $label) = @_;
+        return unless ref($d) eq 'ARRAY' && @$d >= 2;
+        $label //= '';
+        printf STDERR "          [dissect %s]\n", $label if $label;
+        if ( $d->[0] == 0x5a && $d->[1] == 0x5a ) {
+            _dissect_outer($d);
+        }
+        elsif ( $d->[0] == 0xaa ) {
+            my $msgtype = $d->[10] // 0;
+            if ( $msgtype == 0x40 || $msgtype == 0x41 ) {
+                # SET or QUERY command — body[1] starts at d[11], $off=9 so $d[$off+2]=d[11]
+                _dissect_cmd_body( $d, 9 );
+            }
+            elsif ( $msgtype == 0xc0 || $msgtype == 0xc1 ) {
+                # response — body[1] starts at d[11], $off=9 so $d[$off+2]=d[11]
+                _dissect_resp_body( $d, 9 );
+            }
+        }
+    }
+}
+
 sub module_installed {
     return eval { require File::Spec->catfile( split( /:{2}/, $_[0] ) ) . '.pm' };
 }
@@ -711,6 +846,7 @@ sub net_request {
     my ( $device_ip, $data ) = @_;
 
     dbg( ">> TX", $data );
+    dissect_packet( $data, '>> TX' );
 
     my $client = IO::Socket->new(
         Domain   => IO::Socket::AF_INET,
@@ -851,6 +987,7 @@ sub send_request {
     dbg( "<< RX/dec", $response );
     my $unpadded = [ @{$response}[ 0x00 .. $#$response - $response->[-1] ] ];
     dbg( "<< RX/cmd", $unpadded );
+    dissect_packet( $unpadded, '<< RX/cmd' );
     return $unpadded;
 }
 
