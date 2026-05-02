@@ -12,7 +12,7 @@ Potentially compatible with other brands sharing the same M-Smart V3 protocol (E
 ## Usage
 
 ```
-ac.pl --ip <address> [--get | --set] [options]
+ac.pl --ip <address> [--get | --set | --caps] [options]
 ```
 
 ### Get current state
@@ -36,6 +36,27 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
 
 # Single parameter
 ac.pl --ip 192.168.1.2 --set --temp 17
+```
+
+### Device capabilities
+
+Query supported modes, temperature range, swing directions, turbo, eco and other
+device capabilities via the B5 local protocol query:
+
+```sh
+ac.pl --ip 192.168.1.2 --caps
+```
+
+Output includes current state fields alongside `cap_*` capability flags, for example:
+
+```
+cap_modes:cool+heat+dry+auto
+cap_swing:up_down+left_right
+cap_turbo:heat
+cap_eco:yes
+cap_cool_min:16
+cap_cool_max:30
+...
 ```
 
 ### Device discovery

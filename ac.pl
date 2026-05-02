@@ -29,8 +29,9 @@ use constant {
 };
 
 use constant {
-    BLOCK_LEN    => 16,
-    RESPONSE_LEN => 104
+    BLOCK_LEN         => 16,
+    RESPONSE_LEN      => 104,
+    DIAG_RESPONSE_LEN => 256
 };
 
 use constant {
@@ -110,6 +111,26 @@ use constant {
     ]
 };
 
+
+use constant {
+    # key = (d2 << 8) | d3, where d2=wire_byte[1] (b in setFuncEnable), d3=wire_byte[0] (b2)
+    # e.g. wire [0x18, 0x00] → key = (0x00 << 8) | 0x18 = 0x0018
+    B5_PROPS => {
+        0x0018 => 'cap_no_wind_feel',     # d2=0, d3=24
+        0x0210 => 'cap_no_wind_speed',    # d2=2, d3=16
+        0x0212 => 'cap_eco',              # d2=2, d3=18
+        0x0213 => 'cap_eight_hot',        # d2=2, d3=19
+        0x0214 => 'cap_modes',            # d2=2, d3=20
+        0x0215 => 'cap_swing',            # d2=2, d3=21
+        0x0216 => 'cap_power_cal',        # d2=2, d3=22
+        0x0217 => 'cap_self_check',       # d2=2, d3=23
+        0x0219 => 'cap_aux_heat',         # d2=2, d3=25
+        0x021a => 'cap_turbo',            # d2=2, d3=26
+        0x021f => 'cap_humidity_clear',   # d2=2, d3=31
+        0x0222 => 'cap_unit_changeable',  # d2=2, d3=34
+        0x0225 => 'cap_temp_range',       # d2=2, d3=37
+    }
+};
 
 use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' }; # hardcoded in libEncodeAndDecodeUtils.so
 #use constant { KEY => md5(KEY_SIGN) }; # 6a92ef406bad2f0359baad994171ea6d
@@ -297,6 +318,10 @@ use constant {
                 on  => ON
             }
         },
+        err_code => {
+            state => STATE_VALUE,
+            parse => sub { $_[0]->[0x10] },
+        },
         temp_int => {
             state => STATE_VALUE,
             parse => sub { ( $_[0]->[0x0b] - 0x32 ) / 0x02 },
@@ -430,6 +455,29 @@ sub dbg {
         _dline( 'temp_unit',   '%s', ($b10 & 0x04) ? 'F' : 'C' );
     }
 
+    sub _dissect_b5_body {
+        my ($d, $off) = @_;
+        $off //= 0;
+        printf STDERR "          --- B5 body ---\n";
+        return unless @$d > $off + 2;
+        my $count = $d->[$off + 2];
+        _dline( 'cap_count', '%d', $count );
+        my $pos = $off + 3;
+        for my $i ( 1 .. $count ) {
+            last if $pos + 2 >= @$d;
+            my $d3  = $d->[$pos];
+            my $d2  = $d->[$pos + 1];
+            my $len = $d->[$pos + 2];
+            $pos += 3;
+            last if $pos + $len > @$d;
+            my @val = @{$d}[ $pos .. $pos + $len - 1 ];
+            $pos += $len;
+            my $key  = ( $d2 << 8 ) | $d3;
+            my $name = B5_PROPS->{$key} // sprintf( 'cap_%02x_%02x', $d3, $d2 );
+            _dline( $name, '%s', ahex( \@val ) );
+        }
+    }
+
     sub _dissect_resp_body {
         my ($d, $off) = @_;
         $off //= 0;
@@ -492,6 +540,9 @@ sub dbg {
             elsif ( $msgtype == 0xc0 || $msgtype == 0xc1 ) {
                 # response — body[1] starts at d[11], $off=9 so $d[$off+2]=d[11]
                 _dissect_resp_body( $d, 9 );
+            }
+            elsif ( $msgtype == 0xb5 ) {
+                _dissect_b5_body( $d, 9 );
             }
         }
     }
@@ -992,7 +1043,8 @@ sub discover_response {
 }
 
 sub net_request {
-    my ( $device_ip, $data ) = @_;
+    my ( $device_ip, $data, $recv_len ) = @_;
+    $recv_len //= RESPONSE_LEN;
 
     dbg( ">> TX", $data );
     dissect_packet( $data, '>> TX' );
@@ -1010,7 +1062,7 @@ sub net_request {
     $client->send( deflate $data) == scalar @{$data}
       or $client->close(), die "Send error";
 
-    $client->recv( my $buffer, RESPONSE_LEN );
+    $client->recv( my $buffer, $recv_len );
 
     $client->close();
 
@@ -1021,7 +1073,9 @@ sub net_request {
     my $raw = inflate $buffer;
     dbg( "<< RX", $raw );
 
-    my $enc = [ @{$raw}[ 0x28 .. ( ( $len == 0x58 ) ? 0x47 : 0x57 ) ] ];
+    my $enc_end = $len >= 17 ? $len - 17 : 0x27;
+    $enc_end = 0x27 if $enc_end < 0x28;
+    my $enc = [ @{$raw}[ 0x28 .. $enc_end ] ];
     dbg( "<< RX/enc", $enc );
 
     return $enc;
@@ -1131,8 +1185,8 @@ sub net_discover_broadcast {
 }
 
 sub send_request {
-    my ( $device_ip, $data ) = @_;
-    my $response = decrypt( net_request( $device_ip, $data ) );
+    my ( $device_ip, $data, $recv_len ) = @_;
+    my $response = decrypt( net_request( $device_ip, $data, $recv_len ) );
     dbg( "<< RX/dec", $response );
     my $unpadded = [ @{$response}[ 0x00 .. $#$response - $response->[-1] ] ];
     dbg( "<< RX/cmd", $unpadded );
@@ -1162,6 +1216,126 @@ sub update {
 
 sub fetch {
     return request( $_[0], status_packet() );
+}
+
+sub diag_cmd {
+    my @body = ( 0xb5, 0x01, 0x11 );
+    push @body, crc8( \@body );    # internal CRC of 3-byte body prefix
+    return [
+        0xaa, 0x0e, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x03, @body          # no separate frame CRC — packet() adds makeSum
+    ];
+}
+
+sub diag_packet {
+    return packet( diag_cmd() );
+}
+
+sub parse_b5 {
+    my ($data) = @_;
+    return {} unless defined $data && scalar(@$data) > 0x0c && $data->[0x0a] == 0xb5;
+
+    my @body  = @{$data}[ 0x0b .. $#$data ];
+    my $count = $body[0];
+    my %props;
+    my $pos = 1;
+
+    for my $i ( 1 .. $count ) {
+        last if $pos + 2 >= scalar @body;
+        my $d3  = $body[$pos];          # first wire byte
+        my $d2  = $body[ $pos + 1 ];   # second wire byte
+        my $len = $body[ $pos + 2 ];
+        $pos += 3;
+        last if $pos + $len > scalar @body;
+        my @val = @body[ $pos .. $pos + $len - 1 ];
+        $pos += $len;
+        my $key  = ( $d2 << 8 ) | $d3;
+        my $name = B5_PROPS->{$key} // sprintf( 'cap_%02x_%02x', $d3, $d2 );
+        $props{$name} = \@val;
+    }
+
+    return \%props;
+}
+
+my %_CAP_MODES = (
+    1 => 'cool+heat+dry+auto',
+    2 => 'heat+auto',
+    3 => 'cool',
+    4 => 'cool+heat+wind',
+);
+my %_CAP_SWING = (
+    0 => 'up_down',
+    1 => 'up_down+left_right',
+    2 => 'none',
+    3 => 'left_right',
+);
+my %_CAP_SELF_CHECK = (
+    1 => 'yes',
+    2 => 'yes+nest',
+    3 => 'nest_only',
+    4 => 'no',
+);
+my %_CAP_TURBO = (
+    0 => 'no',
+    1 => 'heat',
+    2 => 'cool',
+    3 => 'heat+cool',
+);
+
+sub render_b5 {
+    my ($props) = @_;
+    my %out;
+    while ( my ( $k, $v ) = each %$props ) {
+        my $d = $v->[0] // 0;
+        if ( $k eq 'cap_modes' ) {
+            $out{$k} = $_CAP_MODES{$d} // 'cool+dry+auto';
+        }
+        elsif ( $k eq 'cap_swing' ) {
+            $out{$k} = $_CAP_SWING{$d} // ahex($v);
+        }
+        elsif ( $k eq 'cap_self_check' ) {
+            $out{$k} = $_CAP_SELF_CHECK{$d} // ahex($v);
+        }
+        elsif ( $k eq 'cap_eco' ) {
+            $out{$k} = $d == 2 ? 'special' : ( $d ? 'yes' : 'no' );
+        }
+        elsif ( $k eq 'cap_unit_changeable' ) {
+            $out{$k} = $d == 0 ? 'yes' : 'no';    # inverted: 0 = changeable
+        }
+        elsif ( $k eq 'cap_turbo' ) {
+            $out{$k} = $_CAP_TURBO{$d} // ahex($v);
+        }
+        elsif ( $k eq 'cap_temp_range' && scalar(@$v) >= 6 ) {
+            $out{cap_cool_min} = $v->[0] / 2.0;
+            $out{cap_cool_max} = $v->[1] / 2.0;
+            $out{cap_auto_min} = $v->[2] / 2.0;
+            $out{cap_auto_max} = $v->[3] / 2.0;
+            $out{cap_heat_min} = $v->[4] / 2.0;
+            $out{cap_heat_max} = $v->[5] / 2.0;
+        }
+        elsif ( $k eq 'cap_humidity_clear' ) {
+            my %h = ( 0 => 'no', 1 => 'auto', 2 => 'manual', 3 => 'auto+manual' );
+            $out{$k} = $h{$d} // ahex($v);
+        }
+        elsif ( $k =~ /^cap_(?:no_wind|eight_hot|aux_heat|power_cal)/ ) {
+            $out{$k} = $d ? 'yes' : 'no';
+        }
+        else {
+            $out{$k} = ahex($v);
+        }
+    }
+    return \%out;
+}
+
+sub diag {
+    my ($device_ip) = @_;
+
+    my $std = eval { settings_val( fetch($device_ip) ) } // {};
+
+    my $b5_raw = eval { send_request( $device_ip, diag_packet(), DIAG_RESPONSE_LEN ) };
+    my $b5 = $b5_raw ? render_b5( parse_b5($b5_raw) ) : {};
+
+    return { %$std, %$b5 };
 }
 
 sub scan {
@@ -1271,6 +1445,7 @@ Getopt::Long::GetOptions(
       debug
       set
       get
+      caps
       value
       unquote_num
       discover
@@ -1292,7 +1467,7 @@ $DEBUG = 1 if exists $option->{debug};
 
 Pod::Usage::pod2usage(2)
   if ( not( exists $option->{ip} ) )
-  or (  not( exists $option->{exit} or exists $option->{discover} )
+  or (  not( exists $option->{exit} or exists $option->{discover} or exists $option->{caps} )
     and not( exists $option->{set} or exists $option->{get} ) )
   or ( exists $option->{set}
     and not grep { exists SETTINGS->{$_}->{input} } keys %{$option} )
@@ -1340,6 +1515,10 @@ if ( exists $option->{discover} ) {
     }
 
     exit ( scalar @{$found} ? EXIT_NORMAL : EXIT_ERROR );
+}
+
+if ( exists $option->{caps} ) {
+    print vals( diag( $option->{ip} ), %{$option} );
 }
 
 if ( exists $option->{set} ) {
@@ -1393,6 +1572,7 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
 
    --get             fetch device settings [default]
    --set             update device settings
+   --caps            query device capabilities (status + B5 capability report)
 
    --discover        searches for compatible devices
 
@@ -1427,6 +1607,17 @@ Print a brief help message and exits.
 =item B<--ip>
 
 IP address or host name of the device
+
+=item B<--caps>
+
+Query device capabilities. Sends a standard status query (CMD_41) and a B5
+capability query (0xB5). Outputs current operating state alongside device
+capability flags (supported modes, swing directions, turbo, eco, temperature
+range, etc.). Unknown B5 entries appear as C<cap_XX_XX> with their raw hex values.
+
+Example:
+
+  ac.pl --ip 192.168.1.2 --caps
 
 =item B<--get>
 
