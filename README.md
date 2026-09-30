@@ -41,7 +41,8 @@ ac.pl --ip 192.168.1.2 --set --temp 17
 ### Device capabilities
 
 Query supported modes, temperature range, swing directions, turbo, eco and other
-device capabilities via the B5 local protocol query:
+device capabilities via B5 (including a second frame when needed), plus B1
+properties and group_data power/runtime:
 
 ```sh
 ac.pl --ip 192.168.1.2 --caps
@@ -88,14 +89,29 @@ ac.pl --ip 192.168.1.2 --exit power || echo "AC is off"
 | `--power` | `on` / `off` | Power state |
 | `--temp` | `16..30` (step 0.5) | Target temperature, °C |
 | `--mode` | `auto` `cool` `dry` `heat` `fan` | Operation mode |
-| `--fan` | `auto` `high` `medium` `low` `mute` | Fan speed |
-| `--swing` | `off` `vertical` `horizontal` `both` | Louver mode |
+| `--fan` | `auto` `high` `medium` `low` `silent` (`mute` = alias) | Fan speed; output always `silent` |
+| `--swing` | `off` `vertical` `horizontal` `both` | Louver swing mode (C0) |
+| `--swing_h` | `off` `left` `left_mid` `middle` `right_mid` `right` | Fixed horizontal angle (B0/B1); on this model `off` is ignored |
+| `--swing_v` | `off` `up` `up_mid` `middle` `down_mid` `down` | Fixed vertical angle (B0/B1); on this model `off` is ignored |
+| `--breezeless` | `on` / `off` | Breezeless / no-wind-feel (B0/B1) |
+| `--display` | `on` / `off` | Panel screen display (B0/B1) |
+| `--humidity` | (get only) | Indoor humidity % from B1 |
 | `--turbo` | `on` / `off` | Turbo mode |
 | `--eco` | `on` / `off` | Eco mode |
 | `--sleep` | `on` / `off` | Sleep mode |
-| `--buzzer` | `on` / `off` | Audible feedback |
+| `--buzzer` | `on` / `off` | Audible feedback (prompt tone) |
+| `--led` | `on` / `off` | C0 display LED |
+| `--unit` | `C` / `F` | Temperature unit |
+| `--power_saving` | `on` / `off` | Power saving |
+| `--smart_eye` | `on` / `off` | Smart eye |
+| `--dry_clean` | `on` / `off` | Dry clean |
+| `--aux_heat` | `on` / `off` | Auxiliary PTC heat |
+| `--anion` | `on` / `off` | Anion / ionizer |
+| `--natural_wind` | `on` / `off` | Natural wind |
+| `--frost_protect` | `on` / `off` | Frost protect |
+| `--comfort` | `on` / `off` | Comfort mode |
 
-`--exit` accepts: `power` `turbo` `eco` `sleep` `buzzer` `led` `error`
+`--exit` accepts any boolean field above (plus `error`).
 
 ## Output formatting
 

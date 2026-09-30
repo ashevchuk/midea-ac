@@ -132,10 +132,49 @@ use constant {
     }
 };
 
+# B0/B1 property tags (midealan CapabilityTag / PropertiesDefaultQuery)
+use constant {
+    PROP_WIND_UD    => 0x0009,
+    PROP_WIND_LR    => 0x000A,
+    PROP_HUMIDITY   => 0x0015,
+    PROP_DISPLAY    => 0x0017,
+    PROP_BREEZELESS => 0x0018,
+};
+
+use constant {
+    SWING_H_VAL => {
+        off       => 0,
+        left      => 1,
+        left_mid  => 25,
+        middle    => 50,
+        right_mid => 75,
+        right     => 100,
+    },
+    SWING_V_VAL => {
+        off      => 0,
+        up       => 1,
+        up_mid   => 25,
+        middle   => 50,
+        down_mid => 75,
+        down     => 100,
+    },
+};
+
+# Valid indoor/outdoor sensor range (°C); outside → "n/a"
+use constant {
+    TEMP_SENSOR_MIN => -20,
+    TEMP_SENSOR_MAX => 60,
+};
+
 use constant { KEY_SIGN => 'xhdiwjnchekd4d512chdjx5d8e4c394D2D7S' }; # hardcoded in libEncodeAndDecodeUtils.so
 #use constant { KEY => md5(KEY_SIGN) }; # 6a92ef406bad2f0359baad994171ea6d
 use constant { KEY => "6a92ef406bad2f0359baad994171ea6d" }; # precomputed md5(KEY_SIGN): 6a92ef406bad2f0359baad994171ea6d
 
+# AA set/get body offsets (StateSet / StateBody / DataBodyDevOld):
+#   [0x0a]=msgtype  [0x0b]=power/buzzer  [0x0c]=mode/temp  [0x0d]=fan
+#   [0x11]=swing  [0x12]=turbo/power_saving  [0x13]=eco/anion/dry/aux/eye
+#   [0x14]=sleep/unit/led/turbo2  [0x1b]=natural_wind  [0x1f]=frost  [0x20]=comfort
+# Response parse body is sliced from msgtype (body[0]=0xC0/0xC1).
 use constant {
     SETTINGS => {
         fan => {
@@ -154,6 +193,7 @@ use constant {
                 range_low  => WIND_SPEED->{RANGE_LOW},
                 low        => WIND_SPEED->{LOW},
                 mute       => WIND_SPEED->{MUTE},
+                silent     => WIND_SPEED->{MUTE},
                 map { ( $_ < 20 or $_ % 10 ) ? ( "range_" . $_ => $_ ) : () } 1 .. 99
             }
         },
@@ -185,7 +225,6 @@ use constant {
                 }
             },
             state => STATE_VALUE,
-
             parse => sub { $_[0]->[0x07] & 0x0f },
             val   => {
                 off        => 0x00,
@@ -209,16 +248,17 @@ use constant {
                 on  => ON
             }
         },
+        # prompt_tone (0x40); keep keyStatus bit 0x02 untouched on clear
         buzzer => {
             input => {
                 type => OPT_STR,
                 set  => sub {
-                    $_[0]->[0x0b] &= ~0x42;
-                    $_[0]->[0x0b] |= $_[1] ? 0x42 : OFF;
+                    $_[0]->[0x0b] &= ~0x40;
+                    $_[0]->[0x0b] |= $_[1] ? 0x40 : OFF;
                 }
             },
             state => STATE_BOOLEAN,
-            parse => sub { ( $_[0]->[0x0b] & 0x42 ) > OFF ? ON : OFF },
+            parse => sub { ( $_[0]->[0x01] & 0x40 ) > OFF ? ON : OFF },
             val   => {
                 off => OFF,
                 on  => ON
@@ -238,17 +278,30 @@ use constant {
                 set  => sub {
                     $_[0]->[0x0c] &= ~0x0f;
                     $_[0]->[0x0c] |= int( $_[1] ) & 0x0f;
-                    POSIX::ceil( $_[1] * 2 ) % 2 != 0 ? $_[0]->[0x0c] |= 0x10 : $_[0]->[0x0c] &= ~0x10;
+                    POSIX::ceil( $_[1] * 2 ) % 2 != 0
+                      ? $_[0]->[0x0c] |= 0x10
+                      : $_[0]->[0x0c] &= ~0x10;
                 }
             },
             state => STATE_VALUE,
-            parse => sub { ( $_[0]->[0x02] & 0x0f ) + 16.0 + ( $_[0]->[0x02] & 0x10 > OFF ? 0.5 : 0.0 ) },
-            val   => { map { ( $_, $_ ) } map { ( $_, $_ < TEMP_MAX ? $_ + TEMP_STEP : () ) } TEMP_MIN .. TEMP_MAX }
+            parse => sub {
+                ( $_[0]->[0x02] & 0x0f ) + 16.0
+                  + ( ( $_[0]->[0x02] & 0x10 ) > OFF ? 0.5 : 0.0 );
+            },
+            val => {
+                map { ( $_, $_ ) }
+                  map { ( $_, $_ < TEMP_MAX ? $_ + TEMP_STEP : () ) }
+                  TEMP_MIN .. TEMP_MAX
+            }
         },
+        # set bit7 / get bit4 — same quirk as midealan StateSet/StateBody
         eco => {
             input => {
                 type => OPT_STR,
-                set  => sub { $_[0]->[0x13] &= ~0x80; $_[0]->[0x13] |= $_[1] ? 0x80 : OFF }
+                set  => sub {
+                    $_[0]->[0x13] &= ~0x80;
+                    $_[0]->[0x13] |= $_[1] ? 0x80 : OFF;
+                }
             },
             state => STATE_BOOLEAN,
             parse => sub { ( $_[0]->[0x09] & 0x10 ) > OFF ? ON : OFF },
@@ -260,7 +313,7 @@ use constant {
         turbo => {
             input => {
                 type => OPT_STR,
-                set => sub {
+                set  => sub {
                     $_[0]->[0x12] &= ~0x20;
                     $_[0]->[0x12] |= ( $_[1] << 0x05 ) & 0x20;
                     $_[0]->[0x14] &= ~0x02;
@@ -268,8 +321,16 @@ use constant {
                 }
             },
             state => STATE_BOOLEAN,
-            parse => sub { ( ( ( $_[0]->[0x08] & 0x20 ) >> 0x05 == OFF ) ? ( ( $_[0]->[0x0a] & 0x02 ) >> 0x01 ) : ( ( $_[0]->[0x08] & 0x20 ) >> 0x05 )) > OFF ? ON : OFF },
-            val   => {
+            parse => sub {
+                (
+                    (
+                        ( $_[0]->[0x08] & 0x20 ) >> 0x05 == OFF
+                        ? ( ( $_[0]->[0x0a] & 0x02 ) >> 0x01 )
+                        : ( ( $_[0]->[0x08] & 0x20 ) >> 0x05 )
+                    )
+                ) > OFF ? ON : OFF;
+            },
+            val => {
                 off => OFF,
                 on  => ON
             }
@@ -318,17 +379,166 @@ use constant {
                 on  => ON
             }
         },
+        power_saving => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x12] &= ~0x08;
+                    $_[0]->[0x12] |= $_[1] ? 0x08 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x08] & 0x08 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        smart_eye => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x13] &= ~0x01;
+                    $_[0]->[0x13] |= $_[1] ? 0x01 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x09] & 0x01 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        dry_clean => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x13] &= ~0x04;
+                    $_[0]->[0x13] |= $_[1] ? 0x04 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x09] & 0x04 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        aux_heat => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x13] &= ~0x08;
+                    $_[0]->[0x13] |= $_[1] ? 0x08 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x09] & 0x08 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        anion => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x13] &= ~0x20;
+                    $_[0]->[0x13] |= $_[1] ? 0x20 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub { ( $_[0]->[0x09] & 0x20 ) > OFF ? ON : OFF },
+            val   => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        natural_wind => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x1b] &= ~0x40;
+                    $_[0]->[0x1b] |= $_[1] ? 0x40 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            # StateBody reports this on byte9 bit1; StateSet writes byte17 bit6
+            parse => sub {
+                my $b = $_[0];
+                ( ( $b->[0x09] // 0 ) & 0x02 ) > OFF
+                  || ( ( $b->[0x11] // 0 ) & 0x40 ) > OFF ? ON : OFF;
+            },
+            val => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        frost_protect => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x1f] &= ~0x80;
+                    $_[0]->[0x1f] |= $_[1] ? 0x80 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub {
+                ( ( $_[0]->[0x15] // 0 ) & 0x80 ) > OFF ? ON : OFF;
+            },
+            val => {
+                off => OFF,
+                on  => ON
+            }
+        },
+        comfort => {
+            input => {
+                type => OPT_STR,
+                set  => sub {
+                    $_[0]->[0x20] &= ~0x01;
+                    $_[0]->[0x20] |= $_[1] ? 0x01 : OFF;
+                }
+            },
+            state => STATE_BOOLEAN,
+            parse => sub {
+                ( ( $_[0]->[0x16] // 0 ) & 0x01 ) > OFF ? ON : OFF;
+            },
+            val => {
+                off => OFF,
+                on  => ON
+            }
+        },
         err_code => {
             state => STATE_VALUE,
             parse => sub { $_[0]->[0x10] },
         },
         temp_int => {
             state => STATE_VALUE,
-            parse => sub { ( $_[0]->[0x0b] - 0x32 ) / 0x02 },
+            parse => sub {
+                my $raw = $_[0]->[0x0b];
+                my $t   = ( $raw - 0x32 ) / 0x02;
+                return 'n/a'
+                  if !defined $raw
+                  || $raw == 0x00
+                  || $raw == 0xff
+                  || $t < TEMP_SENSOR_MIN
+                  || $t > TEMP_SENSOR_MAX;
+                return $t;
+            },
         },
         temp_ext => {
             state => STATE_VALUE,
-            parse => sub { ( $_[0]->[0x0c] - 0x32 ) / 0x02 },
+            parse => sub {
+                my $raw = $_[0]->[0x0c];
+                my $t   = ( $raw - 0x32 ) / 0x02;
+                return 'n/a'
+                  if !defined $raw
+                  || $raw == 0x00
+                  || $raw == 0xff
+                  || $t < TEMP_SENSOR_MIN
+                  || $t > TEMP_SENSOR_MAX;
+                return $t;
+            },
         },
     }
 };
@@ -383,7 +593,7 @@ sub dbg {
     my ( $label, $data ) = @_;
     use feature 'state';
     state $i = 0;
-    printf STDERR "[DUBUG %03d]%-10s (%3d bytes):%s\n", $i++, $label, scalar( @{$data} ), ahex($data);
+    printf STDERR "[DEBUG %03d]%-10s (%3d bytes):%s\n", $i++, $label, scalar( @{$data} ), ahex($data);
 }
 
 # Packet dissection stuff
@@ -885,12 +1095,15 @@ sub set_cmd {
 
     my $data = [ @{ +COMMAND } ];
 
-    $data->[0x01] = 0x23;
     $data->[0x09] = 0x02;
-    $data->[0x0a] = 0x40;
-    $data->[0x08] = 0x03;          # protocol v3 for write commands (DataBodyDevOld updateProtocol)
-    $data->[0x0b] = 0x02 | 0x40;  # body[1] base = 0x42 (remoteControlCode + keyStatus, from SwitchBean defaults)
-    push @{$data}, (0x00) x 3;
+    $data->[0x0a] = 0x40;         # set
+    $data->[0x08] = 0x03;         # device protocol (DataBodyDevOld updateProtocol)
+    $data->[0x0b] = 0x02;         # keyStatus; buzzer/prompt_tone applied via SETTINGS
+
+    # StateSet body is 22 bytes after FirstByte (indices 0x0b .. 0x20)
+    my $need = 0x0b + 22;
+    push @{$data}, (0x00) x ( $need - scalar @{$data} )
+      if scalar @{$data} < $need;
 
     for ( keys %{$settings} ) {
         SETTINGS->{$_}->{input}->{set}->( $data, $settings->{$_} )
@@ -898,6 +1111,7 @@ sub set_cmd {
     }
 
     push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
+    $data->[0x01] = scalar @{$data};
 
     return $data;
 }
@@ -984,7 +1198,18 @@ sub vals {
 
 sub settings_val {
     my ($data) = @_;
-    return { map { ( $_, SETTINGS_VAL->{$_}->{val}->{ $data->{$_} } // $data->{$_} ) } keys %{$data} };
+    my %out = map {
+        ( $_, SETTINGS_VAL->{$_}->{val}->{ $data->{$_} } // $data->{$_} )
+    } keys %{$data};
+
+    # Prefer canonical "silent" over alias "mute" for the same wire value
+    if ( exists $data->{fan}
+        && ( ( $data->{fan} & 0x7f ) == WIND_SPEED->{MUTE} ) )
+    {
+        $out{fan} = 'silent';
+    }
+
+    return \%out;
 }
 
 sub settings_str {
@@ -1062,7 +1287,17 @@ sub net_request {
     $client->send( deflate $data) == scalar @{$data}
       or $client->close(), die "Send error";
 
-    $client->recv( my $buffer, $recv_len );
+    my $buffer = '';
+    {
+        local $SIG{ALRM} = sub { die "timeout" };
+        alarm TIMEOUT;
+        eval { $client->recv( $buffer, $recv_len ); 1 } or do {
+            alarm 0;
+            $client->close();
+            die $@ || "timeout";
+        };
+        alarm 0;
+    }
 
     $client->close();
 
@@ -1219,21 +1454,31 @@ sub fetch {
 }
 
 sub diag_cmd {
-    my @body = ( 0xb5, 0x01, 0x11 );
-    push @body, crc8( \@body );    # internal CRC of 3-byte body prefix
+    my ($additional) = @_;
+
+    # First frame matches the OEM/working query (0x01, 0x11).
+    # Second frame matches midealan CapabilitiesAdditionalQuery (0x01, 0x01, 0x01).
+    my @payload =
+      $additional
+      ? ( 0x01, 0x01, 0x01 )
+      : ( 0x01, 0x11 );
+
+    my @body = ( 0xb5, @payload );
+    push @body, crc8( \@body );
     return [
-        0xaa, 0x0e, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x03, @body          # no separate frame CRC — packet() adds makeSum
+        0xaa, 0x00, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x03, @body
     ];
 }
 
 sub diag_packet {
-    return packet( diag_cmd() );
+    return packet( diag_cmd( $_[0] ) );
 }
 
 sub parse_b5 {
     my ($data) = @_;
-    return {} unless defined $data && scalar(@$data) > 0x0c && $data->[0x0a] == 0xb5;
+    return ( {}, 0 )
+      unless defined $data && scalar(@$data) > 0x0c && $data->[0x0a] == 0xb5;
 
     my @body  = @{$data}[ 0x0b .. $#$data ];
     my $count = $body[0];
@@ -1242,8 +1487,8 @@ sub parse_b5 {
 
     for my $i ( 1 .. $count ) {
         last if $pos + 2 >= scalar @body;
-        my $d3  = $body[$pos];          # first wire byte
-        my $d2  = $body[ $pos + 1 ];   # second wire byte
+        my $d3  = $body[$pos];
+        my $d2  = $body[ $pos + 1 ];
         my $len = $body[ $pos + 2 ];
         $pos += 3;
         last if $pos + $len > scalar @body;
@@ -1254,29 +1499,34 @@ sub parse_b5 {
         $props{$name} = \@val;
     }
 
-    return \%props;
+    # Trailer [flag, msg_id, crc]: non-zero flag → second B5 frame available
+    my $need_more = 0;
+    if ( scalar(@body) - $pos >= 3 ) {
+        $need_more = ( $body[$pos] // 0 ) ? 1 : 0;
+    }
+
+    return ( \%props, $need_more );
 }
 
-my %_CAP_MODES = (
-    1 => 'cool+heat+dry+auto',
-    2 => 'heat+auto',
-    3 => 'cool',
-    4 => 'cool+heat+wind',
-);
-my %_CAP_SWING = (
-    0 => 'up_down',
-    1 => 'up_down+left_right',
-    2 => 'none',
-    3 => 'left_right',
-);
+# B5 decode aligned with midealan CapabilityBody + OEM CmdB5.setFuncEnable
+my %_CAP_HEAT   = map { $_ => 1 } ( 1, 2, 4, 6, 7, 9, 10, 11, 12, 13 );
+my %_CAP_NOCOOL = map { $_ => 1 } ( 2, 10, 12 );
+my %_CAP_DRY    = map { $_ => 1 } ( 0, 1, 5, 6, 9, 11, 13 );
+my %_CAP_AUTO   = map { $_ => 1 } ( 0, 1, 2, 7, 8, 9, 13 );
+my %_CAP_SWING_H = map { $_ => 1 } ( 1, 3 );
+my %_CAP_FAN_LH  = map { $_ => 1 } ( 3, 4, 5, 6, 7, 9 );
+my %_CAP_FAN_M   = map { $_ => 1 } ( 5, 6, 7 );
+my %_CAP_FAN_A   = map { $_ => 1 } ( 4, 5, 6, 9 );
+my %_CAP_FAN_S   = map { $_ => 1 } ( 6, 9 );
 my %_CAP_SELF_CHECK = (
+    0 => 'no',
     1 => 'yes',
     2 => 'yes+nest',
     3 => 'nest_only',
-    4 => 'no',
+    4 => 'yes+nest_change',
 );
 my %_CAP_TURBO = (
-    0 => 'no',
+    0 => 'cool',
     1 => 'heat',
     2 => 'cool',
     3 => 'heat+cool',
@@ -1288,22 +1538,45 @@ sub render_b5 {
     while ( my ( $k, $v ) = each %$props ) {
         my $d = $v->[0] // 0;
         if ( $k eq 'cap_modes' ) {
-            $out{$k} = $_CAP_MODES{$d} // 'cool+dry+auto';
+            my @m;
+            push @m, 'heat' if $_CAP_HEAT{$d};
+            push @m, 'cool' unless $_CAP_NOCOOL{$d};
+            push @m, 'dry'  if $_CAP_DRY{$d};
+            push @m, 'auto' if $_CAP_AUTO{$d};
+            $out{$k} = @m ? join( '+', @m ) : sprintf( 'raw_%d', $d );
         }
         elsif ( $k eq 'cap_swing' ) {
-            $out{$k} = $_CAP_SWING{$d} // ahex($v);
+            my @s;
+            push @s, 'horizontal' if $_CAP_SWING_H{$d};
+            push @s, 'vertical'   if $d < 2;
+            $out{$k} = @s ? join( '+', @s ) : 'none';
+        }
+        elsif ( $k eq 'cap_no_wind_speed' ) {
+            my @f;
+            my $custom = $d == 1;
+            push @f, 'silent' if $custom || $_CAP_FAN_S{$d};
+            push @f, 'low'    if $custom || $_CAP_FAN_LH{$d};
+            push @f, 'medium' if $custom || $_CAP_FAN_M{$d};
+            push @f, 'high'   if $custom || $_CAP_FAN_LH{$d};
+            push @f, 'auto'   if $custom || $_CAP_FAN_A{$d};
+            push @f, 'custom' if $custom;
+            $out{cap_fan_speeds} = @f ? join( '+', @f ) : sprintf( 'raw_%d', $d );
         }
         elsif ( $k eq 'cap_self_check' ) {
             $out{$k} = $_CAP_SELF_CHECK{$d} // ahex($v);
         }
         elsif ( $k eq 'cap_eco' ) {
-            $out{$k} = $d == 2 ? 'special' : ( $d ? 'yes' : 'no' );
+            $out{$k} = $d == 2 ? 'special' : ( ( $d == 1 || $d == 2 ) ? 'yes' : 'no' );
         }
         elsif ( $k eq 'cap_unit_changeable' ) {
-            $out{$k} = $d == 0 ? 'yes' : 'no';    # inverted: 0 = changeable
+            $out{$k} = $d == 0 ? 'yes' : 'no';
         }
         elsif ( $k eq 'cap_turbo' ) {
-            $out{$k} = $_CAP_TURBO{$d} // ahex($v);
+            # midealan: value < 2 => turbo_cool; heat set {1,3} roughly
+            my @t;
+            push @t, 'cool' if $d < 2;
+            push @t, 'heat' if $d == 1 || $d == 3;
+            $out{$k} = @t ? join( '+', @t ) : ( $_CAP_TURBO{$d} // 'no' );
         }
         elsif ( $k eq 'cap_temp_range' && scalar(@$v) >= 6 ) {
             $out{cap_cool_min} = $v->[0] / 2.0;
@@ -1312,12 +1585,16 @@ sub render_b5 {
             $out{cap_auto_max} = $v->[3] / 2.0;
             $out{cap_heat_min} = $v->[4] / 2.0;
             $out{cap_heat_max} = $v->[5] / 2.0;
+            if ( scalar(@$v) > 6 ) {
+                my $dec_i = scalar(@$v) > 8 ? 8 : 6;
+                $out{cap_temp_decimals} = ( $v->[$dec_i] // 0 ) ? 'yes' : 'no';
+            }
         }
         elsif ( $k eq 'cap_humidity_clear' ) {
             my %h = ( 0 => 'no', 1 => 'auto', 2 => 'manual', 3 => 'auto+manual' );
             $out{$k} = $h{$d} // ahex($v);
         }
-        elsif ( $k =~ /^cap_(?:no_wind|eight_hot|aux_heat|power_cal)/ ) {
+        elsif ( $k =~ /^cap_(?:no_wind_feel|eight_hot|aux_heat|power_cal)/ ) {
             $out{$k} = $d ? 'yes' : 'no';
         }
         else {
@@ -1332,10 +1609,295 @@ sub diag {
 
     my $std = eval { settings_val( fetch($device_ip) ) } // {};
 
-    my $b5_raw = eval { send_request( $device_ip, diag_packet(), DIAG_RESPONSE_LEN ) };
-    my $b5 = $b5_raw ? render_b5( parse_b5($b5_raw) ) : {};
+    # Brief pause — back-to-back status→B5 sometimes gets no reply on this unit
+    select( undef, undef, undef, 0.15 );
+    my $b5_raw =
+      eval { send_request( $device_ip, diag_packet(0), DIAG_RESPONSE_LEN ) };
+    my ( $b5_props, $need_more ) =
+      ( $b5_raw && ( $b5_raw->[0x0a] // 0 ) == 0xb5 )
+      ? parse_b5($b5_raw)
+      : ( {}, 0 );
+    my $b5 = render_b5($b5_props);
 
-    return { %$std, %$b5 };
+    if ($need_more) {
+        select( undef, undef, undef, 0.15 );
+        my $b5b_raw =
+          eval { send_request( $device_ip, diag_packet(1), DIAG_RESPONSE_LEN ) };
+        if ( $b5b_raw && ( $b5b_raw->[0x0a] // 0 ) == 0xb5 ) {
+            my ($extra) = parse_b5($b5b_raw);
+            my $b5b = render_b5($extra);
+            @{$b5}{ keys %$b5b } = values %$b5b;
+        }
+    }
+
+    my $props = eval { fetch_props($device_ip) } // {};
+    my $power = eval { fetch_power($device_ip) } // {};
+
+    return { %$std, %$b5, %$props, %$power };
+}
+
+# --- B0/B1 property protocol (angles, breezeless, display, humidity) ---
+
+sub props_query_cmd {
+    my (@tags) = @_;
+    @tags = (
+        PROP_WIND_UD, PROP_WIND_LR, PROP_HUMIDITY,
+        PROP_DISPLAY, PROP_BREEZELESS
+    ) unless @tags;
+
+    my $data = [
+        0xaa, 0x00, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x03,    # query
+        0xb1, scalar @tags,
+    ];
+    push @{$data}, ( $_ & 0xff ), ( $_ >> 8 ) for @tags;
+    push @{$data}, 0x01;    # message id
+    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
+    $data->[0x01] = scalar @{$data};
+    return $data;
+}
+
+sub props_set_cmd {
+    my (%tag_vals) = @_;
+
+    my @packs;
+    my $count = 0;
+    for my $tag ( sort { $a <=> $b } keys %tag_vals ) {
+        # 4-byte pack format (midealan PropertiesSet wire format)
+        push @packs, ( $tag & 0xff ), ( $tag >> 8 ), 0x01, ( $tag_vals{$tag} & 0xff );
+        $count++;
+    }
+
+    my $data = [
+        0xaa, 0x00, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x03, 0x02,    # device protocol 3, set
+        0xb0, $count, @packs,
+    ];
+    push @{$data}, 0x01;
+    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
+    $data->[0x01] = scalar @{$data};
+    return $data;
+}
+
+sub parse_props {
+    my ($data) = @_;
+    return {} unless defined $data && scalar(@$data) > 0x0c;
+
+    my $bt = $data->[0x0a];
+    return {} unless $bt == 0xb0 || $bt == 0xb1;
+
+    my @body  = @{$data}[ 0x0a .. $#$data ];
+    my $count = $body[1] // 0;
+    my $pos   = 2;
+    my %props;
+
+    for ( 1 .. $count ) {
+        last if $pos + 2 > scalar @body;
+        my $tag = $body[$pos] | ( $body[ $pos + 1 ] << 8 );
+        $pos += 2;
+        # B0/B1 responses use 5-byte TLV: tag_lo, tag_hi, pad, len, value…
+        last if $pos >= scalar @body;
+        $pos += 1;
+        last if $pos >= scalar @body;
+        my $len = $body[$pos++];
+        last if $pos + $len > scalar @body;
+        my @val = @body[ $pos .. $pos + $len - 1 ];
+        $pos += $len;
+        $props{$tag} = \@val;
+    }
+
+    return \%props;
+}
+
+sub _angle_name {
+    my ( $map, $byte ) = @_;
+    my %rev = reverse %{$map};
+    return $rev{$byte} // sprintf( 'raw_%d', $byte );
+}
+
+sub fetch_props {
+    my ($device_ip) = @_;
+
+    my $raw =
+      send_request( $device_ip, packet( props_query_cmd() ), DIAG_RESPONSE_LEN );
+    dbg( "<< B1", $raw );
+    my $props = parse_props($raw);
+    my %out;
+
+    if ( exists $props->{ +PROP_WIND_LR } ) {
+        $out{swing_h} = _angle_name( SWING_H_VAL, $props->{ +PROP_WIND_LR }[0] );
+    }
+    if ( exists $props->{ +PROP_WIND_UD } ) {
+        $out{swing_v} = _angle_name( SWING_V_VAL, $props->{ +PROP_WIND_UD }[0] );
+    }
+    if ( exists $props->{ +PROP_HUMIDITY } ) {
+        $out{humidity} = $props->{ +PROP_HUMIDITY }[0] // 0;
+    }
+    if ( exists $props->{ +PROP_DISPLAY } ) {
+        $out{display} =
+          ( ( $props->{ +PROP_DISPLAY }[0] // 0 ) > 0 ) ? 'on' : 'off';
+    }
+    if ( exists $props->{ +PROP_BREEZELESS } ) {
+        $out{breezeless} =
+          ( ( $props->{ +PROP_BREEZELESS }[0] // 0 ) == 1 ) ? 'on' : 'off';
+    }
+
+    return \%out;
+}
+
+# Back-compat alias
+sub fetch_angles { return fetch_props(@_) }
+
+sub update_props {
+    my ( $device_ip, %want ) = @_;
+
+    my %tags;
+    if ( exists $want{swing_h} ) {
+        die sprintf(
+            qq(Invalid swing_h value: "%s". Use: [%s]),
+            $want{swing_h}, join( "|", sort keys %{ +SWING_H_VAL } )
+        ) unless exists SWING_H_VAL->{ $want{swing_h} };
+        $tags{ +PROP_WIND_LR } = SWING_H_VAL->{ $want{swing_h} };
+    }
+    if ( exists $want{swing_v} ) {
+        die sprintf(
+            qq(Invalid swing_v value: "%s". Use: [%s]),
+            $want{swing_v}, join( "|", sort keys %{ +SWING_V_VAL } )
+        ) unless exists SWING_V_VAL->{ $want{swing_v} };
+        $tags{ +PROP_WIND_UD } = SWING_V_VAL->{ $want{swing_v} };
+    }
+    if ( exists $want{breezeless} ) {
+        die qq(Invalid breezeless value: "$want{breezeless}". Use: [on|off])
+          unless $want{breezeless} eq 'on' || $want{breezeless} eq 'off';
+        $tags{ +PROP_BREEZELESS } = $want{breezeless} eq 'on' ? 0x01 : 0x00;
+    }
+    if ( exists $want{display} ) {
+        die qq(Invalid display value: "$want{display}". Use: [on|off])
+          unless $want{display} eq 'on' || $want{display} eq 'off';
+        # midealan: 0x64 = on, 0x00 = off
+        $tags{ +PROP_DISPLAY } = $want{display} eq 'on' ? 0x64 : 0x00;
+    }
+
+    return {} unless keys %tags;
+
+    my $raw =
+      send_request( $device_ip, packet( props_set_cmd(%tags) ), DIAG_RESPONSE_LEN );
+    dbg( "<< B0", $raw );
+
+    my $out = eval { fetch_props($device_ip) } // {};
+    return {
+        map { ( $_, $out->{$_} ) }
+          grep { exists $want{$_} && exists $out->{$_} }
+          qw[swing_h swing_v breezeless display]
+    };
+}
+
+sub update_angles { return update_props(@_) }
+
+# --- group_data power / energy (0x41 / response 0xC1) ---
+
+sub group_data_cmd {
+    my ($group) = @_;
+    $group //= 0;
+
+    # midealan GroupDataQuery: body_type 0x41, no message_id
+    my $data = [
+        0xaa, 0x00, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x03,
+        0x41, 0x21, 0x01, ( 0x40 | ( $group & 0x0f ) ), 0x00, 0x01,
+    ];
+    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
+    $data->[0x01] = scalar @{$data};
+    return $data;
+}
+
+sub _power_decode_value {
+    my ( $method, $bytes ) = @_;
+    $method = $method % 10;
+    my $value = 0;
+    for my $byte (@$bytes) {
+        if ( $method == 1 ) {    # BCD
+            $value = ( ( $byte >> 4 ) * 10 + ( $byte & 0x0f ) ) + $value * 100;
+        }
+        elsif ( $method == 2 ) {    # BINARY
+            $value = $byte + ( $value << 8 );
+        }
+        else {                      # MIXED / INT (3)
+            $value = $byte + $value * 100;
+        }
+    }
+    return $value;
+}
+
+sub _parse_power_w {
+    my ( $method, $bytes ) = @_;
+    # method 101: BCD energy + binary power — power side uses binary
+    my $m = ( $method == 101 ) ? 2 : $method;
+    return _power_decode_value( $m, $bytes ) / 10.0;
+}
+
+sub _parse_energy_kwh {
+    my ( $method, $bytes ) = @_;
+    if ( $method == 101 ) {
+        return _power_decode_value( 1, $bytes ) / 100.0;
+    }
+    my $div = ( ( $method % 10 ) == 2 ) ? 10.0 : 100.0;
+    return _power_decode_value( $method, $bytes ) / $div;
+}
+
+sub parse_group_power {
+    my ( $data, $method ) = @_;
+    $method //= 1;
+    return {} unless defined $data && ( $data->[0x0a] // 0 ) == 0xc1;
+
+    my @body = @{$data}[ 0x0a .. $#$data ];
+    return {} if scalar(@body) <= 3;
+
+    my $gtype = $body[3];
+    my %out;
+
+    if ( $gtype == 0x44 && scalar(@body) >= 19 ) {
+        $out{energy_total_kwh} =
+          sprintf( '%.2f', _parse_energy_kwh( $method, [ @body[ 4 .. 7 ] ] ) );
+        $out{energy_operating_kwh} =
+          sprintf( '%.2f', _parse_energy_kwh( $method, [ @body[ 8 .. 11 ] ] ) );
+        $out{energy_current_kwh} =
+          sprintf( '%.2f', _parse_energy_kwh( $method, [ @body[ 12 .. 15 ] ] ) );
+        $out{power_w} =
+          sprintf( '%.1f', _parse_power_w( $method, [ @body[ 16 .. 18 ] ] ) );
+    }
+    elsif ( $gtype == 0x40 && scalar(@body) >= 19 ) {
+        my $day  = $body[5] | ( $body[4] << 8 );
+        my $hour = $body[6];
+        my $min  = $body[7];
+        $out{electrify_hours} =
+          sprintf( '%.2f', $day * 24 + $hour + $min / 60.0 );
+    }
+
+    return \%out;
+}
+
+sub fetch_power {
+    my ( $device_ip, $method ) = @_;
+    $method //= 1;
+
+    my %out;
+    # Group 4 (runtime) often answers when group 0 (energy/power) does not;
+    # try 4 first, then merge whatever group 0 returns.
+    for my $group ( 4, 0 ) {
+        my $raw = eval {
+            send_request(
+                $device_ip,
+                packet( group_data_cmd($group) ),
+                DIAG_RESPONSE_LEN
+            );
+        };
+        next unless $raw;
+        dbg( "<< C1/g$group", $raw );
+        my $parsed = parse_group_power( $raw, $method );
+        @out{ keys %$parsed } = values %$parsed if keys %$parsed;
+    }
+    return \%out;
 }
 
 sub scan {
@@ -1456,6 +2018,18 @@ Getopt::Long::GetOptions(
       begin=s
       end=s
       exit=s
+      swing_h:s
+      swing_v:s
+      breezeless:s
+      display:s
+      humidity
+      temp_int
+      temp_ext
+      power_w
+      energy_total_kwh
+      energy_current_kwh
+      energy_operating_kwh
+      electrify_hours
       ],
     map    { join ":", ( $_, SETTINGS->{$_}->{input}->{type} ) }
       grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
@@ -1465,18 +2039,33 @@ Pod::Usage::pod2usage(1) if exists $option->{help};
 
 $DEBUG = 1 if exists $option->{debug};
 
+# mute is an input alias for silent
+$option->{fan} = 'silent'
+  if exists $option->{fan} && defined $option->{fan} && $option->{fan} eq 'mute';
+
+my $has_prop_set =
+     ( exists $option->{swing_h} and defined $option->{swing_h} and length $option->{swing_h} )
+  || ( exists $option->{swing_v} and defined $option->{swing_v} and length $option->{swing_v} )
+  || ( exists $option->{breezeless} and defined $option->{breezeless} and length $option->{breezeless} )
+  || ( exists $option->{display} and defined $option->{display} and length $option->{display} );
+
+# Iterate SETTINGS keys only — never `exists SETTINGS->{$opt_key}->{…}` over
+# CLI keys (autovivifies and pollutes the SETTINGS hash).
+my $has_c0_set = scalar grep { exists $option->{$_} }
+  grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS };
+
 Pod::Usage::pod2usage(2)
   if ( not( exists $option->{ip} ) )
   or (  not( exists $option->{exit} or exists $option->{discover} or exists $option->{caps} )
     and not( exists $option->{set} or exists $option->{get} ) )
-  or ( exists $option->{set}
-    and not grep { exists SETTINGS->{$_}->{input} } keys %{$option} )
+  or ( exists $option->{set} and not( $has_c0_set || $has_prop_set ) )
   or (
     exists $option->{set}
     and grep {
         my $item = $_;
         (
             exists( $option->{$item} ) and exists( SETTINGS->{$item} )
+              and defined( $option->{$item} )
               and (
                 not scalar grep { $option->{$item} eq $_ }
                 keys %{ SETTINGS->{$item}->{val} }
@@ -1490,6 +2079,54 @@ qq(Invaid %s value: "%s". It can take one of the following values: [%s]),
             )
           )
     } grep { exists SETTINGS->{$_}->{input} } keys %{ +SETTINGS }
+  )
+  or (
+    exists $option->{set}
+    and exists $option->{swing_h}
+    and defined $option->{swing_h}
+    and length $option->{swing_h}
+    and not exists SWING_H_VAL->{ $option->{swing_h} }
+    and Pod::Usage::pod2usage(
+        sprintf(
+            qq(Invalid swing_h value: "%s". Use: [%s]),
+            $option->{swing_h},
+            join( "|", sort keys %{ +SWING_H_VAL } )
+        )
+    )
+  )
+  or (
+    exists $option->{set}
+    and exists $option->{swing_v}
+    and defined $option->{swing_v}
+    and length $option->{swing_v}
+    and not exists SWING_V_VAL->{ $option->{swing_v} }
+    and Pod::Usage::pod2usage(
+        sprintf(
+            qq(Invalid swing_v value: "%s". Use: [%s]),
+            $option->{swing_v},
+            join( "|", sort keys %{ +SWING_V_VAL } )
+        )
+    )
+  )
+  or (
+    exists $option->{set}
+    and exists $option->{breezeless}
+    and defined $option->{breezeless}
+    and length $option->{breezeless}
+    and $option->{breezeless} !~ /^(on|off)$/
+    and Pod::Usage::pod2usage(
+        qq(Invalid breezeless value: "$option->{breezeless}". Use: [on|off])
+    )
+  )
+  or (
+    exists $option->{set}
+    and exists $option->{display}
+    and defined $option->{display}
+    and length $option->{display}
+    and $option->{display} !~ /^(on|off)$/
+    and Pod::Usage::pod2usage(
+        qq(Invalid display value: "$option->{display}". Use: [on|off])
+    )
   );
 
 
@@ -1522,19 +2159,58 @@ if ( exists $option->{caps} ) {
 }
 
 if ( exists $option->{set} ) {
-    print settings_str(
-        update( $option->{ip}, settings( $option, fetch( $option->{ip} ) ) ),
-        [ grep { exists SETTINGS->{$_} } keys %{$option} ],
-        %{$option}
-    );
+    my %out;
+
+    if ($has_c0_set) {
+        my $updated =
+          update( $option->{ip}, settings( $option, fetch( $option->{ip} ) ) );
+        my $named = settings_val($updated);
+        for ( grep { exists $option->{$_} } keys %{ +SETTINGS } ) {
+            $out{$_} = $named->{$_} if exists $named->{$_};
+        }
+    }
+
+    if ($has_prop_set) {
+        my %want;
+        for my $k (qw[swing_h swing_v breezeless display]) {
+            $want{$k} = $option->{$k}
+              if exists $option->{$k}
+              and defined $option->{$k}
+              and length $option->{$k};
+        }
+        my $props = update_props( $option->{ip}, %want );
+        @out{ keys %$props } = values %$props;
+    }
+
+    print vals( \%out, %{$option} );
 }
 
 if ( exists $option->{get} ) {
-    print settings_str(
-        fetch( $option->{ip} ),
-        [ grep { exists SETTINGS->{$_} } keys %{$option} ],
-        %{$option}
-    );
+    my $named = settings_val( fetch( $option->{ip} ) );
+    my $props = eval { fetch_props( $option->{ip} ) } // {};
+    my $power = eval { fetch_power( $option->{ip} ) } // {};
+    my %all   = ( %$named, %$props, %$power );
+
+    my @c0 = grep { exists $option->{$_} } keys %{ +SETTINGS };
+    my @extra;
+    for my $k (
+        qw[swing_h swing_v breezeless display humidity
+          power_w energy_total_kwh energy_current_kwh
+          energy_operating_kwh electrify_hours]
+      )
+    {
+        push @extra, $k if exists $option->{$k};
+    }
+
+    my %out;
+    if ( @c0 || @extra ) {
+        $out{$_} = $all{$_} for grep { exists $all{$_} } ( @c0, @extra );
+    }
+    else {
+        %out = %all;
+    }
+
+    print vals( \%out, %{$option} );
 }
 
 if ( exists $option->{exit} ) {
@@ -1549,7 +2225,8 @@ qq(Invaid exit value: "%s". It can take one of the following values: [%s]),
                   and SETTINGS->{$_}->{state} eq STATE_BOOLEAN
             } keys %{ +SETTINGS }
         )
-    ) unless exists SETTINGS->{ $option->{exit} }->{parse};
+    ) unless exists SETTINGS->{ $option->{exit} }
+      && exists SETTINGS->{ $option->{exit} }->{parse};
 
     exit( fetch( $option->{ip} )->{ $option->{exit} } == ON ? EXIT_NORMAL : EXIT_ERROR );
 }
@@ -1580,11 +2257,31 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --temp            set target temperature: [16..30]
    --mode            set operational mode: [auto|cool|dry|heat|fan]
    --fan             set fan speed: [auto|high|medium|low|silent]
+                     (mute accepted as alias for silent; output always silent)
    --turbo           turn turbo mode: [on|off]
    --swing           set swing mode: [off|vertical|horizontal|both]
+   --swing_h         horizontal louver angle (B0/B1):
+                     [off|left|left_mid|middle|right_mid|right]
+                     (on this model, off is ignored)
+   --swing_v         vertical louver angle (B0/B1):
+                     [off|up|up_mid|middle|down_mid|down]
+                     (on this model, off is ignored)
+   --breezeless      breezeless / no-wind-feel (B0/B1): [on|off]
+   --display         panel screen display (B0/B1): [on|off]
+   --humidity        indoor humidity from B1 (get only)
    --eco             turn eco mode: [on|off]
    --sleep           turn sleep mode: [on|off]
    --buzzer          turn audible feedback: [on|off]
+   --power_saving    turn power saving: [on|off]
+   --smart_eye       turn smart eye / follow: [on|off]
+   --dry_clean       turn dry clean: [on|off]
+   --aux_heat        turn auxiliary PTC heat: [on|off]
+   --anion           turn anion / ionizer: [on|off]
+   --natural_wind    turn natural wind: [on|off]
+   --frost_protect   turn frost protect: [on|off]
+   --comfort         turn comfort mode: [on|off]
+   --led             turn C0 display LED: [on|off]
+   --unit            temperature unit: [C|F]
 
    --value           output of values alone
    --begin           beginning of the output string [default: none]
@@ -1594,7 +2291,10 @@ ac.pl --ip 192.168.1.2 --set --power on --mode cool --temp 20
    --separator       field separator [default: ":"]
    --delimiter       fields delimiter [default: "\n"]
 
-   --exit            exit code 0 if value ON, else exit code 1 [eco|led|error|turbo|sleep|buzzer|power]
+   --exit            exit code 0 if value ON, else exit code 1
+                     [power|eco|led|error|turbo|sleep|buzzer|unit|
+                      power_saving|smart_eye|dry_clean|aux_heat|anion|
+                      natural_wind|frost_protect|comfort]
 
 =head1 OPTIONS
 
@@ -1610,10 +2310,12 @@ IP address or host name of the device
 
 =item B<--caps>
 
-Query device capabilities. Sends a standard status query (CMD_41) and a B5
-capability query (0xB5). Outputs current operating state alongside device
-capability flags (supported modes, swing directions, turbo, eco, temperature
-range, etc.). Unknown B5 entries appear as C<cap_XX_XX> with their raw hex values.
+Query device capabilities. Sends a standard status query (CMD_41), B5
+capability query (0xB5, including a second frame when the device reports
+more capabilities), B1 property query (louver angles, breezeless, display,
+humidity), and group_data power query (0x41/0xC1). Outputs current operating
+state alongside device capability flags. Unknown B5 entries appear as
+C<cap_XX_XX> with their raw hex values.
 
 Example:
 
@@ -1681,6 +2383,9 @@ The parameter controls the operation mode of the device blower fan
 
 It can take one of the following values: [auto|high|medium|low|silent]
 
+C<mute> is accepted as an input alias for C<silent>. Status output always
+uses the canonical name C<silent>.
+
 =item B<--turbo>
 
 The parameter controls the turbo mode of the device
@@ -1692,6 +2397,43 @@ It can take one of the following values: [on|off]
 The parameter controls the operation mode of the blinds of the device
 
 It can take one of the following values: [off|vertical|horizontal|both]
+
+=item B<--swing_h>
+
+Fixed horizontal louver angle via B0/B1 property protocol (tag 0x000A).
+
+Values: [off|left|left_mid|middle|right_mid|right]
+
+Complements C<--swing>; use after enabling horizontal swing if needed.
+
+On this model, angle C<off> is ignored (firmware keeps the last fixed
+position). Use a named position to move the louvers.
+
+=item B<--swing_v>
+
+Fixed vertical louver angle via B0/B1 property protocol (tag 0x0009).
+
+Values: [off|up|up_mid|middle|down_mid|down]
+
+On this model, angle C<off> is ignored (same as C<--swing_h>).
+
+=item B<--breezeless>
+
+Breezeless / no-wind-feel via B0/B1 property protocol (tag 0x0018).
+
+Values: [on|off]
+
+=item B<--display>
+
+Panel screen display via B0/B1 property protocol (tag 0x0017). Distinct from
+C<--led> (C0 SETTINGS bit).
+
+Values: [on|off]
+
+=item B<--humidity>
+
+Indoor relative humidity (%), read-only via B1 property tag 0x0015.
+Use with C<--get> (or included in full C<--get> / C<--caps>).
 
 =item B<--eco>
 
@@ -1707,9 +2449,49 @@ It can take one of the following values: [on|off]
 
 =item B<--buzzer>
 
-The parameter controls the sound response mode of the device
+The parameter controls the sound response mode of the device (prompt tone)
 
 It can take one of the following values: [on|off]
+
+=item B<--power_saving>
+
+Power saving mode. Values: [on|off]
+
+=item B<--smart_eye>
+
+Smart eye / follow-me style sensor. Values: [on|off]
+
+=item B<--dry_clean>
+
+Dry clean mode. Values: [on|off]
+
+=item B<--aux_heat>
+
+Auxiliary PTC heat. Values: [on|off]
+
+=item B<--anion>
+
+Anion / ionizer. Values: [on|off]
+
+=item B<--natural_wind>
+
+Natural wind. Values: [on|off]
+
+=item B<--frost_protect>
+
+Frost protect. Values: [on|off]
+
+=item B<--comfort>
+
+Comfort mode. Values: [on|off]
+
+=item B<--led>
+
+Panel / display LED. Values: [on|off]
+
+=item B<--unit>
+
+Temperature unit. Values: [C|F]
 
 =item B<--value>
 
