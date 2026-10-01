@@ -7,7 +7,7 @@ Command-line tools for **Midea M-Smart** air conditioners:
 - **`ac-cloud.pl`** — cloud login + LAN V3 (`0x8370`) token handshake / status
 
 LAN mode is potentially compatible with other brands sharing the same M-Smart V3
-protocol (Electrolux, Carrier, Toshiba, etc.). You can identify such devices
+protocol (Electrolux, Carrier, Toshiba, Neoclima, etc.). You can identify such devices
 using the "NetHome Plus" app.
 
 ## Requirements
