@@ -127,12 +127,18 @@ local function parse_b0_tags(hex)
   return tags
 end
 
--- Regular-body diff, excluding the trailing checksum/CRC bytes (the last
--- two bytes of the frame always change when anything earlier does, and
--- are not a property location).
+-- Regular-body diff, excluding the trailing 3 bytes: this device script
+-- writes a math.random() message-id byte, then a crc8 over everything
+-- including that random byte, then getTotalMsg's own outer checksum over
+-- everything including THAT — three bytes that differ on every call
+-- regardless of what property changed, not a property location. (Found by
+-- calling the same probe twice and seeing bytes still move: the RNG is
+-- seeded from os.time(), so two calls in the same wall-clock second are
+-- identical and two calls a second apart are not — a trap for exactly
+-- this kind of probing if not excluded.)
 local function regular_diff(h1, h2)
   local total = math.min(#h1, #h2) / 2
-  local d = diff_hex(h1:sub(1, (total - 2) * 2), h2:sub(1, (total - 2) * 2))
+  local d = diff_hex(h1:sub(1, (total - 3) * 2), h2:sub(1, (total - 3) * 2))
   return d
 end
 

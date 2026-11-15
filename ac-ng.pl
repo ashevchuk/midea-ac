@@ -543,14 +543,14 @@ my %FAN_NAME = ( 102 => 'auto', 80 => 'high', 60 => 'medium', 40 => 'low', 20 =>
 # base-boolean field has shown this asymmetry.
 my %SET_BIT_OVERRIDE = ( eco => { mask => 0x80, shift => 7 } );
 
-# UNRELIABLE_SET: fields where a single-bit flip at the get-side offset
-# also moved an unexplained byte elsewhere in the probe data (tubro/turbo:
-# flipping body[10] bit1 also changed body[25] in every "on" observation,
-# not just a checksum ripple — see .notes/). Not yet understood, so not
-# wired into the generic engine; refuse rather than risk a half-right
-# packet the device silently ignores (which is exactly what happened in
-# testing: the bit alone did not take effect).
-my %UNRELIABLE_SET = ( tubro => 1, pmv => 1 );
+# UNRELIABLE_SET: fields the generic single-byte engine can't handle yet.
+# tubro used to be here too — it looked like it needed a second,
+# unexplained byte, but that was the script's math.random() message-id
+# byte plus its dependent checksums bleeding into the probe diff (fixed in
+# harness.lua's regular_diff). pmv is genuinely two bytes (bodyBytes[17]
+# and [18]), which this engine doesn't support yet — that's a real gap,
+# not noise.
+my %UNRELIABLE_SET = ( pmv => 1 );
 
 sub render_value {
     my ( $prop, $raw, $set_props, $get_props ) = @_;
