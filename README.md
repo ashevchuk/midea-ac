@@ -180,6 +180,7 @@ ac-check.pl --user EMAIL --pass PASS --device-id <APPLIANCE_ID> --start --more
 ac-check.pl --user EMAIL --pass PASS --device-id <APPLIANCE_ID> --history
 ac-check.pl --user EMAIL --pass PASS --device-id <APPLIANCE_ID> \
   --history-id <HISTORY_ID> --details
+ac-check.pl --user EMAIL --pass PASS --device-id <APPLIANCE_ID> --lua
 
 # Or via environment (same commands without --user/--pass)
 export MIDEA_EMAIL='you@example.com'
@@ -194,6 +195,7 @@ ac-check.pl --device-id <APPLIANCE_ID> --start --more
 | `--pass PASS` | Account password |
 | `--list` | List appliances |
 | `--device-id ID` | Cloud appliance id (from `--list`) |
+| `--lua` | Download this appliance's device-specific protocol lua script to `./` |
 | `--start` | Start iCheck, wait for `historyId`, then `--details` |
 | `--details` | Fault details (`history/detail` when `--history-id` is set) |
 | `--more` | Full checkMore catalog (needs `historyId` from start or flag) |

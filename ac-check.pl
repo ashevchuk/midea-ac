@@ -29,6 +29,11 @@ use constant {
     APP_KEY  => 'ac21b9f9cbfe4ca5a88562ef25e2b768',
     IOT_KEY  => 'meicloud',
     HMAC_KEY => 'PROD_VnoClJI9aikS8dyy',
+
+    # Fixed key/iv for /v2/luaEncryption/luaGet (applianceSn + lua file body).
+    # Independent of the per-session AES keys above; same for every account.
+    LUA_FIXED_KEY => 'b5d1453ec418536a',
+    LUA_FIXED_IV  => 'e3ffc17cf1fe23ac',
 };
 
 # Regional MAS hosts (host only; path appended in https_json)
@@ -67,11 +72,13 @@ Usage:
   ac-check.pl --user EMAIL --pass PASS --device-id ID --start [--more]
   ac-check.pl --user EMAIL --pass PASS --device-id ID --history
   ac-check.pl --user EMAIL --pass PASS --device-id ID --history-id ID --details
+  ac-check.pl --user EMAIL --pass PASS --device-id ID --lua
 
 Env: MIDEA_EMAIL, MIDEA_PASSWORD (used when --user/--pass omitted)
 
   --list          list appliances (id / online / sn)
   --device-id     cloud appliance id (from --list)
+  --lua           download this appliance's protocol lua script to ./
   --start         run new iCheck, wait for historyId, then --details
   --details       fault details (history/detail if --history-id set)
   --more          full OK/FAULT catalog (checkMore; needs historyId)
@@ -503,6 +510,82 @@ sub list_appliances {
     return \@rows;
 }
 
+sub find_appliance {
+    my ($id) = @_;
+    my $rows = list_appliances();
+    for my $r (@$rows) {
+        return $r if $r->{id} eq $id;
+    }
+    return undef;
+}
+
+sub normalize_device_type {
+    my ($type) = @_;
+    return '0xac' unless defined $type && length $type;
+    return lc($type)                     if $type =~ /^0x[0-9a-fA-F]+$/;
+    return sprintf( '0x%x', $type )       if $type =~ /^\d+$/;
+    return lc($type);
+}
+
+sub curl_get_raw {
+    my ($url) = @_;
+    my @cmd = ( 'curl', '-sS', '-m', '60', $url );
+    open my $fh, '-|', @cmd or die "curl: $!\n";
+    my $out = do { local $/; <$fh> };
+    close $fh;
+    return $out // '';
+}
+
+# --- lua protocol script download via /v2/luaEncryption/luaGet ---
+# Same scheme as the "SmartHome" cloud class in the open-source midealan
+# project: applianceSn and the downloaded file body are both AES-128-CBC
+# with a fixed key/iv, unrelated to the per-session login AES keys.
+
+sub download_lua {
+    my ($appliance_id) = @_;
+
+    my $row = find_appliance($appliance_id)
+      // die "appliance $appliance_id not found (see --list)\n";
+    die "no SN for appliance $appliance_id\n" unless length $row->{sn};
+
+    my $g = general_data();
+    $g->{applianceMFCode} = '0000';
+    $g->{applianceType}   = normalize_device_type( $row->{type} );
+    $g->{applianceSn} =
+      unpack( 'H*', aes128_cbc( 1, LUA_FIXED_KEY, LUA_FIXED_IV, $row->{sn} ) );
+    $g->{version}       = '0';
+    $g->{encryptedType} = '2';
+
+    my ( $code, $raw ) = api_data( '/v2/luaEncryption/luaGet', $g );
+    die "luaGet failed (code=$code): $raw\n" if $code != 0;
+
+    my $url       = json_get( $raw, 'url' );
+    my $file_name = json_get( $raw, 'fileName' );
+    die "no url/fileName in luaGet response: $raw\n"
+      unless defined $url && length $url && defined $file_name && length $file_name;
+
+    # Server-supplied name: keep the basename only, never a path.
+    $file_name =~ s{.*[/\\]}{};
+    die "bad fileName in luaGet response: $file_name\n"
+      unless length($file_name) && $file_name ne '.' && $file_name ne '..';
+
+    my $body = curl_get_raw($url);
+    $body =~ s/\s+//g;
+    die "empty or non-hex response fetching lua file from $url\n"
+      unless length($body) && $body =~ /^[0-9a-fA-F]+$/;
+
+    my $plain =
+      eval { aes128_cbc( 0, LUA_FIXED_KEY, LUA_FIXED_IV, pack( 'H*', $body ) ) };
+    die "lua decrypt failed: $@" if $@ || !defined $plain;
+    $plain =~ s/\r\n/\n/g;
+
+    open my $fh, '>', $file_name or die "write $file_name: $!\n";
+    print {$fh} $plain;
+    close $fh;
+
+    return $file_name;
+}
+
 # --- iCheck via /v1/app2base/data/transmit ---
 
 sub app2base_transmit {
@@ -796,6 +879,7 @@ Getopt::Long::GetOptions(
     'device-id=s',
     'history-id=s',
     'list',
+    'lua',
     'start',
     'details',
     'more',
@@ -817,7 +901,7 @@ die_usage(2) unless $opt{user} && $opt{pass};
 $DEBUG = 1 if $opt{debug};
 my $poll = $opt{poll} // 15;
 
-unless ( $opt{list} || $opt{start} || $opt{details} || $opt{more}
+unless ( $opt{list} || $opt{lua} || $opt{start} || $opt{details} || $opt{more}
     || $opt{history} || $opt{summary} )
 {
     # default: list if no device; else start+details
@@ -870,6 +954,16 @@ if ( $opt{list} ) {
 
 my $aid = $opt{'device-id'};
 my $history_id = $opt{'history-id'};
+
+if ( $aid && $opt{lua} ) {
+    print "Fetching lua protocol script for appliance $aid...\n";
+    my $file = eval { download_lua($aid) };
+    if ($@) {
+        print STDERR "lua download failed: $@";
+        exit 1;
+    }
+    print "Saved: $file\n";
+}
 
 if ( $aid && $opt{start} ) {
     print "Starting iCheck for appliance $aid (via app2base transmit)...\n";
