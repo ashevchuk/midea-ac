@@ -1613,11 +1613,11 @@ sub diag {
     select( undef, undef, undef, 0.15 );
     my $b5_raw =
       eval { send_request( $device_ip, diag_packet(0), DIAG_RESPONSE_LEN ) };
+    my $b5_supported = $b5_raw && ( $b5_raw->[0x0a] // 0 ) == 0xb5;
     my ( $b5_props, $need_more ) =
-      ( $b5_raw && ( $b5_raw->[0x0a] // 0 ) == 0xb5 )
-      ? parse_b5($b5_raw)
-      : ( {}, 0 );
+      $b5_supported ? parse_b5($b5_raw) : ( {}, 0 );
     my $b5 = render_b5($b5_props);
+    $b5->{cap_query} = $b5_supported ? 'ok' : 'unsupported';
 
     if ($need_more) {
         select( undef, undef, undef, 0.15 );
@@ -2316,6 +2316,12 @@ more capabilities), B1 property query (louver angles, breezeless, display,
 humidity), and group_data power query (0x41/0xC1). Outputs current operating
 state alongside device capability flags. Unknown B5 entries appear as
 C<cap_XX_XX> with their raw hex values.
+
+C<cap_query> reports whether the B5 capability query itself worked:
+C<ok> means the device answered with a real B5 frame (so C<cap_*> fields
+reflect it), C<unsupported> means it didn't (no B5-type response, or no
+response at all) — in that case any other C<cap_*> fields are absent, not
+just empty, and should not be read as "device has no capabilities".
 
 Example:
 
