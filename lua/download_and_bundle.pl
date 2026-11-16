@@ -25,13 +25,23 @@ Getopt::Long::GetOptions(
     'device-id=s',
     'region=s',
     'out=s',
+    'user=s',
+    'pass=s',
     'help',
 ) or usage(2);
 
 usage(0) if $opt{help};
 usage(2) unless $opt{out};
 
-die "need MIDEA_EMAIL/MIDEA_PASSWORD in the environment (same as ac-check.pl)\n"
+# --user/--pass are just an alternative to exporting MIDEA_EMAIL/
+# MIDEA_PASSWORD beforehand — funneled into %ENV here so every later use
+# (cloud_login() below, and the ac-check.pl subprocess each appliance
+# spawns) stays exactly as before: credentials travel via environment,
+# never as a child process's argv, so they never show up in `ps`.
+$ENV{MIDEA_EMAIL}    = $opt{user} if defined $opt{user};
+$ENV{MIDEA_PASSWORD} = $opt{pass} if defined $opt{pass};
+
+die "need MIDEA_EMAIL/MIDEA_PASSWORD in the environment (same as ac-check.pl), or --user/--pass\n"
   unless $ENV{MIDEA_EMAIL} && $ENV{MIDEA_PASSWORD};
 
 my $orig_dir = Cwd::getcwd();
@@ -155,11 +165,15 @@ bundles each one. Each bundle is named after its downloaded protocol
 script (ac-<script-basename>.pl) inside --out, which is created if
 missing.
 
-Env: MIDEA_EMAIL, MIDEA_PASSWORD (required — same account ac-check.pl uses)
+Credentials: --user/--pass, or MIDEA_EMAIL/MIDEA_PASSWORD in the
+environment (same account ac-check.pl uses) — one or the other is
+required.
 
   --device-id   cloud appliance id (from ac-check.pl --list); bundles
                 just this one appliance if given
   --out         directory to write the bundled control script(s) into
+  --user        account email (or set MIDEA_EMAIL instead)
+  --pass        account password (or set MIDEA_PASSWORD instead)
   --region      us|eu|prod|ru|jp (optional; omit to auto-probe)
 USAGE
     exit( $code // 1 );

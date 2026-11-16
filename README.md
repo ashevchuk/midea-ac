@@ -313,6 +313,9 @@ lua/download_and_bundle.pl --out ./bundled
 
 # Just one appliance (id from: ac-check.pl --list)
 lua/download_and_bundle.pl --out ./bundled --device-id <APPLIANCE_ID>
+
+# Or pass credentials as flags instead of env vars
+lua/download_and_bundle.pl --out ./bundled --user you@example.com --pass '...'
 ```
 
 This logs in, downloads each appliance's own protocol script, and
