@@ -239,17 +239,22 @@ ac-check.pl --device-id <APPLIANCE_ID> --start --more
 For Wi‑Fi modules that speak **LAN V3** (`0x8370`): the local session is locked
 to a cloud-issued `token`/`key`, so the default AES key used by `ac.pl` is not
 enough. This script logs into SmartHome, fetches those keys, and does the V3
-handshake on port `6444` — that part (`0x8370` framing, AES-CBC, sha256
-signing) is a standard, structurally complete implementation.
+handshake on port `6444`.
 
-**`--get` is not actually usable yet**: it prints the raw response as hex
-(`V3 response (N bytes): <hex>`) with no field decoding at all — no power,
-mode, temperature, nothing parsed out, unlike `ac.pl`/`ac-ng.pl`. The status
-query packet it sends (`v2_status_packet()`) also looks unfinished — its own
-in-code comment admits uncertainty about the framing, and it's missing the
-CRC8 trailing byte `ac.pl`'s own packets always have. There's no record of
-this script ever being run against a real V3-locked unit. If you have one
-and get it working (or fix the above), a PR would be very welcome.
+The `0x8370` framing, handshake, and status-query packet construction were
+cross-checked byte-for-byte against the [wuwentao/midea-lan](https://github.com/wuwentao/midea-lan)
+reference implementation (`t/ac-cloud.t` locks in the worked examples) and
+fixed several real bugs found that way: the handshake used AES-128 where the
+real (32-byte) cloud key needs AES-256, the handshake response was parsed 2
+bytes off (missed the per-message request-counter prefix), the `0x8370` size
+field was missing its trailing sign-length in one case, the outer packet's
+length field was written big-endian instead of little-endian, and the status
+query packet itself was built from a misleading sample in a comment rather
+than the real message layout. None of this has been run against a real
+V3-locked unit, though — **`--get` still only prints the raw response as hex**
+(`V3 response (N bytes): <hex>`), with no field decoding into power/mode/
+temperature/etc. If you have a V3 unit and can confirm the handshake/query
+now succeed, or want to add field decoding, a PR would be very welcome.
 
 If your unit already answers **V2** with the default key (most older / unbound
 modules — check with `ac.pl --ip <addr> --get`), use **`ac.pl`** instead;

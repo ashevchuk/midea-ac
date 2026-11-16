@@ -382,13 +382,18 @@ sub aes_cbc {
     my ( $enc, $key_bin, $data ) = @_;
     my $K = unpack( 'H*', $key_bin );
     my $iv = '00' x 16;
+    # The V3 handshake key (from the cloud, or PRESET_KEY) is 32 bytes —
+    # AES-256, not AES-128. Confirmed against midealan/security.py: it
+    # XORs the decrypted handshake block directly against this same key,
+    # which only type-checks if both are the same length.
+    my $bits   = length($key_bin) == 32 ? 256 : 128;
     my $in  = File::Temp->new( UNLINK => 1 );
     my $out = File::Temp->new( UNLINK => 1 );
     binmode $in;
     print {$in} $data;
     $in->flush;
     my @cmd = (
-        'openssl', 'enc', '-aes-128-cbc',
+        'openssl', 'enc', "-aes-$bits-cbc",
         ( $enc ? () : ('-d') ),
         '-nopad', '-K', $K, '-iv', $iv,
         '-in', $in->filename, '-out', $out->filename,
@@ -443,21 +448,50 @@ sub md5_bin {
     return pack( 'H*', md5_hex( $_[0] ) );
 }
 
+# CRC-8/854, no reflection, no final XOR — same table/algorithm as
+# ac.pl/ac-ng.pl's own crc8(), ported verbatim (midealan/crc8.py uses the
+# identical table).
+use constant {
+    CRC8_TABLE_GEN => sub {
+        my ( $p, $v ) = ( 0x00, $_[1] );
+        do { $p |= 0x01 << ( $_[0] - $_ ) if $v & 0x01; $v = $v >> 0x01; }
+          for 0x01 .. $_[0];
+        return map {
+            my $i = $_;
+            $i = ( $i >> 0x01 ) ^ ( $i & 0x01 && $p ) for 0x00 .. 0x07;
+            $i & 0x02**$_[0] - 0x01
+        } 0x00 .. 0xff;
+    }
+};
+use constant { CRC8_TABLE => [ CRC8_TABLE_GEN->( 8, 0x0131 ) ] };
+
+sub crc8 {
+    my $crc = 0;
+    $crc = CRC8_TABLE->[ $crc ^ $_ ] for @{ $_[0] };
+    return $crc;
+}
+
 sub encode_8370 {
     my ( $data, $msgtype ) = @_;
-    my $size    = length($data);
-    my $padding = 0;
-    if (   ( $msgtype == MSG_ENC_REQUEST || $msgtype == MSG_ENC_RESPONSE )
-        && ( ( $size + 2 ) % 16 != 0 ) )
-    {
-        $padding = 16 - ( ( $size + 2 ) & 0x0f );
+    my $size      = length($data);
+    my $padding   = 0;
+    my $encrypted = ( $msgtype == MSG_ENC_REQUEST || $msgtype == MSG_ENC_RESPONSE );
+    if ($encrypted) {
+        # Size field always gains the trailing 32-byte sign for an
+        # encrypted message, whether or not padding is also needed —
+        # confirmed against midealan/security.py: it was previously only
+        # added inside the "padding needed" branch, so a payload that
+        # happened to already be block-aligned got a size field 32 bytes
+        # short.
+        my $rem = ( $size + 2 ) % 16;
+        $padding = $rem ? ( 16 - $rem ) : 0;
+        $data .= join( '', map { chr rand 256 } 1 .. $padding ) if $padding;
         $size += $padding + 32;
-        $data .= join '', map { chr rand 256 } 1 .. $padding;
     }
     my $header = pack( 'CCnCC', 0x83, 0x70, $size, 0x20, ( $padding << 4 ) | $msgtype );
     my $payload = pack( 'n', $REQ_COUNT ) . $data;
     $REQ_COUNT = ( $REQ_COUNT + 1 ) & 0xffff;
-    if ( $msgtype == MSG_ENC_REQUEST || $msgtype == MSG_ENC_RESPONSE ) {
+    if ($encrypted) {
         my $sign = sha256_bin( $header . $payload );
         $payload = aes_cbc( 1, $TCP_KEY, $payload ) . $sign;
     }
@@ -515,9 +549,14 @@ sub v3_handshake {
     die "handshake: $@\n" if $@;
     dbg( 'V3 HS RX', unpack( 'H*', $buf ) );
 
-    # response payload is 64 bytes after 8370 header for handshake
+    # Response payload is 64 bytes after the 6-byte 8370 header AND the
+    # 2-byte request counter every message carries (confirmed against
+    # midealan/device.py: it reads response[8:72], not [6:70] — this was
+    # off by the counter's width, which silently shifted the decrypted
+    # block and sign by 2 bytes and would make the sign check below fail
+    # against any real device).
     my ( undef, undef, $size ) = unpack( 'CCn', substr( $buf, 0, 4 ) );
-    my $body = substr( $buf, 6, $size );
+    my $body = substr( $buf, 8, $size );
     die "handshake ERROR\n" if $body eq 'ERROR';
     die "bad hs length " . length($body) . "\n" unless length($body) == 64;
     my $plain = aes_cbc( 0, $key, substr( $body, 0, 32 ) );
@@ -529,47 +568,64 @@ sub v3_handshake {
     return 1;
 }
 
-sub build_status_v2 {
-    # Minimal CMD_41 status query (same shape as ac.pl get_cmd), wrapped as V2 packet
-    my @cmd = (
-        0xaa, 0x00, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x03, 0x41, 0x81, 0x00, 0xff, 0x03, 0xff,
-        0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    );
-    # length + crc8 left simplistic: device often accepts fixed working packet
-    # Use the known-working encrypted outer from ac.pl style instead:
-    return undef;    # filled below via packet() clone
-}
-
-# Build V2 outer packet like ac.pl (AES-ECB + MD5 footer)
+# Builds the inner AA-level StateQuery frame, then wraps it exactly like
+# ac.pl's V2 packet (AES-128-ECB + MD5 footer) for sending inside the
+# 8370 layer — confirmed against midealan/devices/ac/message.py
+# (StateQuery) and midealan/message.py (MessageRequest), byte for byte:
+#
+#   idx  0    0xAA   flag
+#        1    0x20   length (10-byte header + 22-byte body = 32)
+#        2    0xAC   device type
+#        3-5  0x00   frame checksum (literal) + 2 unused bytes
+#        6    0x00   frame ID
+#        7    0x00   frame protocol version
+#        8    0x00   device protocol version (0 until a reply sets it)
+#        9    0x03   frame type = query
+#        10   0x41   body type (X41)
+#        11-29       query_body: 19 bytes, [0]=0x81 [2]=0xFF, rest 0x00
+#        30   MID    message ID (fixed at 1 — this is a one-shot process,
+#                     not a persistent session needing a real counter)
+#        31   CRC    crc8() over bytes 10..30
+#        32   CSUM   (~sum(bytes 1..31) + 1) & 0xFF
+#
+# The previous version of this packet (and a dead build_status_v2()
+# stub beside it) copied a sample hex string from a *comment* in
+# packet_builder.py — that comment is not actually a StateQuery, its
+# tail bytes (03 FF 00 02) don't match the real query_body (all zero
+# past index 2). That produced a 29-byte frame with the wrong length
+# byte and no message-ID/CRC8/checksum trailer at all.
 sub v2_status_packet {
-    my $inner = pack(
-        'C*',
-        0xaa, 0x1d, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x03, 0x41, 0x81, 0x00, 0xff, 0x03, 0xff,
-        0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00,
-    );
-    # pad + encrypt with LAN_KEY
+    my @header = ( 0xaa, 0x20, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03 );
+    my @query_body = ( 0x81, 0x00, 0xff, (0x00) x 16 );
+    my $message_id = 1;
+    my @body = ( 0x41, @query_body, $message_id );
+    push @body, crc8( \@body );
+    my @frame = ( @header, @body );
+    my $sum = 0;
+    $sum += $_ for @frame[ 1 .. $#frame ];
+    push @frame, ( ( ~$sum + 1 ) & 0xff );
+    my $inner = pack( 'C*', @frame );
+
     my $enc = aes_ecb( 1, LAN_KEY, $inner );
     my $hdr = pack( 'C*',
         0x5a, 0x5a, 0x01, 0x11,
-        0x00, 0x00,    # length placeholder
+        0x00, 0x00,    # length placeholder, little-endian — filled below
         0x20, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     );
-    # Fix: use simpler construction matching ac.pl packet() — for V3 the
-    # inner encrypted V2 packet is what gets wrapped; many stacks send the
-    # full 5a5a frame inside 8370.
-    my $body = $hdr . $enc;
-    my $len  = length($body) + 16;    # + md5
-    substr( $body, 4, 2, pack( 'n', $len ) );
-    my $md = md5_bin( $body . KEY_SIGN );
-    return $body . $md;
+    my $body_wire = $hdr . $enc;
+    my $len = length($body_wire) + 16;    # + trailing md5
+    # Little-endian, confirmed two ways: midealan/packet_builder.py says
+    # so directly, and ac.pl/ac-ng.pl's own already-live-verified packet()
+    # writes this same length field as a single low byte with the next
+    # byte left 0 — i.e. low byte first — not pack('n', ...) (big-endian),
+    # which was putting the length in the wrong byte position entirely.
+    substr( $body_wire, 4, 2, pack( 'v', $len ) );
+    my $md = md5_bin( $body_wire . KEY_SIGN );
+    return $body_wire . $md;
 }
 
 sub v3_request {
@@ -610,6 +666,12 @@ sub tcp_connect {
 }
 
 # --- CLI ---
+#
+# Guarded by `unless (caller)` so t/ac-cloud.t can `require` this file
+# and call its packet-building subs directly, same pattern as
+# ac-ng.pl/ac-check.pl.
+
+unless (caller) {
 
 my %opt;
 Getopt::Long::GetOptions(
@@ -711,3 +773,7 @@ if ( $opt{get} ) {
 }
 
 exit 0;
+
+}
+
+1;
