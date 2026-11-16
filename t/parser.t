@@ -4,7 +4,7 @@ use warnings;
 
 use Test::More;
 use FindBin qw($Bin);
-use lib "$Bin/../reverse/lua";
+use lib "$Bin/../lua";
 
 use PureLua::Parser;
 

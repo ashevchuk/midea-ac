@@ -4,7 +4,7 @@ use warnings;
 
 use Test::More;
 use FindBin qw($Bin);
-use lib "$Bin/../reverse/lua";
+use lib "$Bin/../lua";
 use File::Temp qw(tempfile);
 
 use PureLua::Parser;
@@ -22,12 +22,12 @@ my $luajit = `which luajit 2>/dev/null`;
 chomp $luajit;
 plan skip_all => 'luajit not installed - cannot cross-check against the real interpreter' unless $luajit;
 
-my $device_script = "$Bin/../reverse/lua/T_0000_AC_00000Q1B_2024013001.lua";
+my $device_script = "$Bin/../lua/T_0000_AC_00000Q1B_2024013001.lua";
 plan skip_all => "device script not present: $device_script" unless -f $device_script;
 
 # Make `require "cjson"` resolve to this project's own shim regardless
 # of luajit's working directory.
-local $ENV{LUA_PATH} = "$Bin/../reverse/lua/?.lua;;";
+local $ENV{LUA_PATH} = "$Bin/../lua/?.lua;;";
 
 my $BASE_CONTROL = <<'LUA';
 {
