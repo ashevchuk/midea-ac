@@ -13,7 +13,7 @@ LAN mode is potentially compatible with other brands sharing the same M-Smart V3
 protocol (Midea, Idea, Bek, Electrolux, Carrier, Toshiba, Neoclima, etc.). You can identify such devices
 using the "NetHome Plus" app.
 
-## Running these scripts (new to Perl / Linux?)
+## Running these scripts
 
 Every example below assumes you can just type e.g. `ac.pl --ip ...`. If
 that gives you `Permission denied` or `command not found`, the file
