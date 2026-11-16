@@ -5,6 +5,8 @@ Command-line tools for **Midea M-Smart** air conditioners:
 - **`ac.pl`** — control directly over LAN (no cloud); V2 default-key modules
 - **`ac-check.pl`** — cloud iCheck / diagnostics (MSmartLife overseas)
 - **`ac-cloud.pl`** — cloud login + LAN V3 (`0x8370`) token handshake / status
+  (**work in progress** — handshake only, `--get` doesn't decode fields yet;
+  see the "Cloud + LAN V3" section below)
 - **`ac-ng.pl`** — control over LAN by running *your own unit's* cloud-issued
   protocol script through a built-in pure-Perl Lua interpreter, instead of a
   generic hand-ported byte table; see [Build a script for your own AC](#build-a-script-for-your-own-ac)
@@ -232,16 +234,26 @@ ac-check.pl --device-id <APPLIANCE_ID> --start --more
 
 `--region` can be omitted: the script probes MAS hosts (US is tried first).
 
-## Cloud + LAN V3 (`ac-cloud.pl`)
+## Cloud + LAN V3 (`ac-cloud.pl`) — work in progress, not confirmed working
 
 For Wi‑Fi modules that speak **LAN V3** (`0x8370`): the local session is locked
 to a cloud-issued `token`/`key`, so the default AES key used by `ac.pl` is not
-enough. This script logs into SmartHome, fetches those keys, does the V3
-handshake on port `6444`, and can query status (`--get`).
+enough. This script logs into SmartHome, fetches those keys, and does the V3
+handshake on port `6444` — that part (`0x8370` framing, AES-CBC, sha256
+signing) is a standard, structurally complete implementation.
+
+**`--get` is not actually usable yet**: it prints the raw response as hex
+(`V3 response (N bytes): <hex>`) with no field decoding at all — no power,
+mode, temperature, nothing parsed out, unlike `ac.pl`/`ac-ng.pl`. The status
+query packet it sends (`v2_status_packet()`) also looks unfinished — its own
+in-code comment admits uncertainty about the framing, and it's missing the
+CRC8 trailing byte `ac.pl`'s own packets always have. There's no record of
+this script ever being run against a real V3-locked unit. If you have one
+and get it working (or fix the above), a PR would be very welcome.
 
 If your unit already answers **V2** with the default key (most older / unbound
-modules), use **`ac.pl`** instead — `ac-cloud.pl` will not replace day-to-day
-control for those devices.
+modules — check with `ac.pl --ip <addr> --get`), use **`ac.pl`** instead;
+it's the one this project actually relies on day to day.
 
 ```sh
 # List appliances
