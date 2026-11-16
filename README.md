@@ -13,6 +13,28 @@ LAN mode is potentially compatible with other brands sharing the same M-Smart V3
 protocol (Midea, Idea, Bek, Electrolux, Carrier, Toshiba, Neoclima, etc.). You can identify such devices
 using the "NetHome Plus" app.
 
+## Running these scripts (new to Perl / Linux?)
+
+Every example below assumes you can just type e.g. `ac.pl --ip ...`. If
+that gives you `Permission denied` or `command not found`, the file
+isn't marked executable (a fresh `git clone` usually preserves this,
+but a ZIP download or copying the files elsewhere won't). Two ways to
+fix it — pick either one, you only need to do this once per script:
+
+```sh
+# Option 1: mark it executable, then run it directly
+chmod +x ac.pl
+./ac.pl --ip 192.168.1.2 --get
+
+# Option 2: skip chmod entirely, always run it through perl
+perl ac.pl --ip 192.168.1.2 --get
+```
+
+Everywhere this README writes `ac.pl --ip ...`, read that as `./ac.pl
+--ip ...` or `perl ac.pl --ip ...` depending on which option you picked
+— same for `ac-ng.pl`, `ac-check.pl`, `ac-cloud.pl`, and the scripts
+under `lua/`.
+
 ## Requirements
 
 **`ac.pl` (LAN):**
@@ -260,6 +282,13 @@ cloud issues for *your* specific model — through a pure-Perl Lua 5.1
 interpreter bundled with this project (`lua/PureLua/`) — so set/get
 behavior matches what the official app actually does for that unit,
 not a generic guess.
+
+**`ac-00000Q1B.pl`** in this repo is one such script, already built —
+a ready-to-run bundle for the **00000Q1B** AC model specifically. If
+that's not your exact model (check the label on your unit, or run
+`ac-check.pl --list` and look at the `sn` column), it won't be the
+right protocol script for your device: build your own with the steps
+below instead of assuming this one matches.
 
 ### Quick path: one command
 
