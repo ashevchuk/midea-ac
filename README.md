@@ -5,6 +5,9 @@ Command-line tools for **Midea M-Smart** air conditioners:
 - **`ac.pl`** — control directly over LAN (no cloud); V2 default-key modules
 - **`ac-check.pl`** — cloud iCheck / diagnostics (MSmartLife overseas)
 - **`ac-cloud.pl`** — cloud login + LAN V3 (`0x8370`) token handshake / status
+- **`ac-ng.pl`** — control over LAN by running *your own unit's* cloud-issued
+  protocol script through a built-in pure-Perl Lua interpreter, instead of a
+  generic hand-ported byte table; see [Build a script for your own AC](#build-a-script-for-your-own-ac)
 
 LAN mode is potentially compatible with other brands sharing the same M-Smart V3
 protocol (Midea, Idea, Bek, Electrolux, Carrier, Toshiba, Neoclima, etc.). You can identify such devices
@@ -248,3 +251,71 @@ ac-cloud.pl --ip 192.168.1.2 --preset-keys --get
 | `--preset-keys` | Try built-in midealan default keys (no cloud) |
 | `--region R` | `us` / `eu` / … (optional; omit to auto-probe) |
 | `--debug` | Redacted protocol dump on stderr |
+
+## Build a script for your own AC
+
+`ac.pl` drives every unit through one shared, hand-ported byte-offset
+table. `ac-ng.pl` instead runs the exact protocol script Midea's own
+cloud issues for *your* specific model — through a pure-Perl Lua 5.1
+interpreter bundled with this project (`lua/PureLua/`) — so set/get
+behavior matches what the official app actually does for that unit,
+not a generic guess.
+
+### Quick path: one command
+
+```sh
+export MIDEA_EMAIL='you@example.com'
+export MIDEA_PASSWORD='...'
+
+# Every 0xAC appliance on the account, one bundled script each
+lua/download_and_bundle.pl --out ./bundled
+
+# Just one appliance (id from: ac-check.pl --list)
+lua/download_and_bundle.pl --out ./bundled --device-id <APPLIANCE_ID>
+```
+
+This logs in, downloads each appliance's own protocol script, and
+writes a ready-to-run, self-contained `ac-<script-name>.pl` into
+`./bundled/` for each — no other files needed, copy it anywhere with
+Perl (a router, a NAS, …).
+
+### Use the bundled script
+
+Same `--get` / `--set` shape as `ac.pl`, but flag names come straight
+from the device script's own field names, not `ac.pl`'s table:
+
+```sh
+./bundled/ac-<yourmodel>.pl --ip 192.168.1.2 --get
+./bundled/ac-<yourmodel>.pl --ip 192.168.1.2 --set --power on --mode cool --temperature 24 --eco on
+```
+
+| Option | Values |
+|--------|--------|
+| `--power` | `on` / `off` |
+| `--mode` | `auto` `cool` `dry` `heat` `fan` |
+| `--temperature` | `16..30` (step 0.5) |
+| `--wind_speed` | `auto` `high` `medium` `low` `silent`, or a raw number |
+| `--eco` `--dry` `--ptc` `--tubro` (turbo) `--purifier` `--prevent_cold` `--power_saving` `--comfort_sleep` `--buzzer` `--wind_swing_lr` `--wind_swing_ud` … | `on` / `off` |
+
+Run with `--help` for the full flag list (~35 boolean fields — same
+names the device script itself uses). `--get` with no flags decodes
+every field the device reports, including extended properties
+(`security`, `self_clean`, `voice_control`, …) that `ac.pl --caps`
+can't see.
+
+### Doing it by hand
+
+`download_and_bundle.pl` is just these two steps glued together, for
+every appliance on the account if `--device-id` is omitted:
+
+1. `ac-check.pl --device-id <ID> --lua` — downloads that appliance's
+   actual protocol script (a `.lua` file) to the current directory.
+2. `lua/bundle.pl <that .lua file> <output.pl>` — packs the engine,
+   `ac-ng.pl`, and that script into one standalone file.
+
+`ac-ng.pl` can also run straight off the downloaded `.lua` file without
+bundling, e.g. while developing:
+
+```sh
+ac-ng.pl --ip 192.168.1.2 --lua T_..._2024013001.lua --get
+```
