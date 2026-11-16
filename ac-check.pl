@@ -870,6 +870,14 @@ sub print_check_items {
 }
 
 # --- CLI ---
+#
+# Guarded by `unless (caller)` so other scripts (e.g.
+# lua/download_and_bundle.pl) can `require` this file and call
+# cloud_login()/list_appliances()/download_lua() directly — structured
+# data, not a table to parse back out of printed text — without this
+# block's own Getopt/exit calls firing.
+
+unless (caller) {
 
 my %opt;
 Getopt::Long::GetOptions(
@@ -1023,3 +1031,7 @@ if ( $aid && $opt{summary} ) {
 }
 
 exit 0;
+
+}
+
+1;
