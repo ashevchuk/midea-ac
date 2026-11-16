@@ -354,8 +354,13 @@ every appliance on the account if `--device-id` is omitted:
 
 1. `ac-check.pl --device-id <ID> --lua` — downloads that appliance's
    actual protocol script (a `.lua` file) to the current directory.
+   Needs credentials too, same as above — either
+   `ac-check.pl --user you@example.com --pass '...' --device-id <ID> --lua`
+   or `export MIDEA_EMAIL=... MIDEA_PASSWORD=...` first and drop
+   `--user`/`--pass`.
 2. `lua/bundle.pl <that .lua file> <output.pl>` — packs the engine,
-   `ac-ng.pl`, and that script into one standalone file.
+   `ac-ng.pl`, and that script into one standalone file (no
+   credentials needed, it only touches local files).
 
 `ac-ng.pl` can also run straight off the downloaded `.lua` file without
 bundling, e.g. while developing:
