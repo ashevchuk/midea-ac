@@ -98,16 +98,12 @@ sub rewrite_ac_ng {
 
     $src = assert_sub(
         $src, 1,
-        qr/Usage:\n  ac-ng\.pl --ip <addr> --lua <model\.lua> --get\n  ac-ng\.pl --ip <addr> --lua <model\.lua> --set --power on --mode cool --temperature 24\n\n--lua is the Midea-cloud-issued, device-model-specific protocol script for\nyour device \(as downloaded by ac-check\.pl --lua\)\. This tool runs its real\njsonToData\/dataToJson through a pure-Perl Lua interpreter instead of\nguessing byte offsets\./,
+        qr/Usage:\n  ac-ng\.pl --ip <addr> --lua <model\.lua> --get\n  ac-ng\.pl --ip <addr> --lua <model\.lua> --set --power on --mode cool --temperature 24\n\n--lua is the Midea-cloud-issued, device-model-specific protocol script for\nyour device \(as downloaded by ac-check\.pl --lua\)\. This tool runs its real\njsonToData\/dataToJson through a pure-Perl Lua interpreter instead of\nguessing byte offsets\.\n\n/,
         <<'USAGE'
 Usage:
   ac-ng.pl --ip <addr> --get
   ac-ng.pl --ip <addr> --set --power on --mode cool --temperature 24
 
-This is a bundled, self-contained control script for one specific device
-model: its protocol driver (a Midea-cloud-issued .lua script) is embedded
-below the __DATA__ marker in this same file, run through a pure-Perl Lua
-interpreter — no external files, no --lua flag.
 USAGE
     );
 

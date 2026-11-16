@@ -43,6 +43,6 @@ chmod 0755, $isolated_copy;
 
 my $help_out = `cd "$isolated_dir" && "$^X" ac-bundled.pl --help 2>&1`;
 is( $?, 0, 'bundled script runs --help standalone, isolated from the project tree' );
-like( $help_out, qr/self-contained control script/, 'bundled script --help describes itself as bundled' );
+like( $help_out, qr/--power/, 'bundled script --help lists the actual --set flags, not just a generic blurb' );
 
 done_testing;

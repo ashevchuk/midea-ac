@@ -2884,11 +2884,22 @@ Usage:
   ac-ng.pl --ip <addr> --get
   ac-ng.pl --ip <addr> --set --power on --mode cool --temperature 24
 
-This is a bundled, self-contained control script for one specific device
-model: its protocol driver (a Midea-cloud-issued .lua script) is embedded
-below the __DATA__ marker in this same file, run through a pure-Perl Lua
-interpreter — no external files, no --lua flag.
+--get with no other flags decodes every field the device reports.
 
+--set flags (names match the device script's own field names, not ac.pl's):
+  --power            on|off
+  --mode             auto|cool|dry|heat|fan
+  --temperature      16..30 (step 0.5)
+  --wind_speed       auto|high|medium|low|silent, or a raw number
+  --<flag> on|off, one of:
+    wind_swing_lr wind_swing_ud strong_wind comfort_sleep purifier eco dry
+    prevent_cold power_saving ptc buzzer tubro comfort_power_save
+    natural_wind screen_display no_wind_sense fa_no_wind_sense security
+    self_clean wind_avoid intelligent_wind child_prevent_cold_wind
+    little_angel cool_hot_sense gentle_wind_sense even_wind single_tuyere
+    extreme_wind voice_control pre_cool_hot nobody_energy_save water_pump
+    intelligent_control prevent_super_cool wind_straight
+    auto_prevent_straight_wind yb_wind_avoid
 USAGE
         exit( $opt{help} ? 0 : 2 );
     }
