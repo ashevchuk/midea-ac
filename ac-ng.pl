@@ -1,9 +1,10 @@
 #!/usr/bin/env perl
 #
-# ac-ng.pl — LAN control driven by a generated protocol map
-# (reverse/lua/<model>.protocol.json, from reverse/lua/lua2map.pl) instead
-# of a hand-ported byte-offset table. Pure Perl, standard library only —
-# no CPAN modules, no lua/luajit at runtime (that's generator-only).
+# ac-ng.pl — LAN control driven directly by the Midea-cloud-issued,
+# device-model-specific protocol script (lua/<model>.lua, from
+# ac-check.pl --lua), run through lua/PureLua, a pure-Perl Lua 5.1
+# interpreter — instead of a hand-ported byte-offset table or a generated
+# protocol map. No CPAN modules, no lua/luajit at runtime.
 #
 # Network/crypto layer (packet framing, AES-128-ECB, KEY_SIGN) is the same
 # approach as ac.pl, duplicated here per this project's convention of
@@ -18,6 +19,12 @@ use List::Util   ();
 use Socket       ();
 use IO::Socket   ();
 use IO::Handle   ();
+use FindBin      ();
+use lib "$FindBin::Bin/lua";
+
+use PureLua::Parser;
+use PureLua::Eval;
+use PureLua::Stdlib;
 
 use constant {
     PORT         => 6444,
@@ -277,11 +284,15 @@ sub crc8 {
     return $crc;
 }
 
-sub packet {
+# Pads, encrypts and outer-wraps a command that already ends in its own
+# trailing checksum — used for a frame built by the device .lua script's
+# own jsonToData/getTotalMsg, which computes that checksum itself
+# (confirmed identical algorithm to the one `packet()` below adds: both
+# are `(~sum(bytes[1..end]) + 1) & 0xff`). Calling `packet()` on such a
+# frame would add a second, wrong checksum on top of the real one.
+sub wrap_packet {
     my ($command) = @_;
     my $packet = [ @{ +PACKET } ];
-
-    push @{$command}, ( ( ~List::Util::sum0( @{$command}[ 0x01 .. $#$command ] ) + 0x01 ) & 0xff );
 
     my $pad = BLOCK_LEN - ( scalar(@$command) % BLOCK_LEN );
     push @{$command}, ($pad) x $pad;
@@ -291,6 +302,12 @@ sub packet {
     push @{$packet}, @{ inflate md5( deflate($packet) . KEY_SIGN ) };
 
     return $packet;
+}
+
+sub packet {
+    my ($command) = @_;
+    push @{$command}, ( ( ~List::Util::sum0( @{$command}[ 0x01 .. $#$command ] ) + 0x01 ) & 0xff );
+    return wrap_packet($command);
 }
 
 sub net_request {
@@ -437,75 +454,101 @@ sub json_decode {
     return $parse_value->();
 }
 
-# --- Protocol map: load + reduce into something the engine can drive ---
+# --- Device .lua script engine: runs the real jsonToData/dataToJson ---
 
-sub load_map {
-    my ($path) = @_;
-    open my $fh, '<', $path or die "open $path: $!\n";
-    my $text = do { local $/; <$fh> };
-    close $fh;
-    return json_decode($text);
+# Fixed sentinel identity for every call — not a real per-unit serial,
+# just the same value this project's generator (harness.lua) and its
+# luajit cross-check tests already use, confirmed not to change the frame
+# bytes beyond this. Revisit if a future model's script branches on it.
+use constant { DEVICE_INFO_LUA => '{ deviceSubType = 2, deviceSN = "00000000000000Q1B0" }' };
+
+# Bootstrap baseline this model's jsonToModel needs populated on every
+# control call to avoid a nil-arithmetic crash (see harness.lua's own
+# BASE_CONTROL for the full rationale) — model-specific; a different
+# device .lua may need a different baseline.
+my %BASE_CONTROL = (
+    power             => 'on',  mode          => 'cool', temperature  => 24,
+    small_temperature => 0,     wind_speed    => 50,      wind_swing_ud => 'off',
+    wind_swing_lr     => 'off', strong_wind   => 'off',   comfort_sleep => 'off',
+    purifier          => 'off', eco           => 'off',   dry           => 'off',
+    prevent_cold      => 'off', power_saving  => 'off',   ptc           => 'off',
+    sleep_status      => 0,
+);
+
+# wind_speed's control-side range is a raw 1-102 value, not a name (see
+# keyP["fanspeedValue"] = checkBoundary(..., 1, 102) in the device script)
+# — same codes this project's old byte-offset table used.
+my %WIND_SPEED_CODE = ( auto => 102, high => 80, medium => 60, low => 40, silent => 20 );
+
+sub lua_literal {
+    my ($v) = @_;
+    return $v if $v =~ /^-?\d+(?:\.\d+)?$/;
+    ( my $esc = $v ) =~ s/([\\"])/\\$1/g;
+    return qq{"$esc"};
 }
 
-# Reduce get_results (per-bit observations) into one {byte,mask,shift} per
-# property, keyed on its lowest touched byte offset (see build_get_props'
-# body comment for why that, and not "most bits", is the real one).
-sub build_get_props {
-    my ($map) = @_;
-    my %by_prop;
-    for my $r ( @{ $map->{get_results} } ) {
-        next if $r->{structural};
-        push @{ $by_prop{ $r->{property} } }, $r;
-    }
-    my %props;
-    for my $prop ( keys %by_prop ) {
-        my %by_byte;
-        push @{ $by_byte{ $_->{byte} } }, $_->{bit} for @{ $by_prop{$prop} };
-        # The real encoding is reliably the lowest byte offset touched —
-        # side effects of a probe (e.g. a sleep-curve table appearing
-        # further into the body) always land at a higher offset, and can
-        # outnumber the real bits (seen for "temperature": 5 artifact bits
-        # at byte 13 vs its real 4 bits at byte 2).
-        my ($primary_byte) = sort { $a <=> $b } keys %by_byte;
-        my @bits = sort { $a <=> $b } @{ $by_byte{$primary_byte} };
-        my $mask = 0;
-        $mask |= ( 1 << $_ ) for @bits;
-        $props{$prop} = { byte => $primary_byte + 0, mask => $mask, shift => $bits[0] };
-    }
-    return \%props;
+sub lua_table_literal {
+    my (%h) = @_;
+    return '{' . join( ', ', map { "$_ = " . lua_literal( $h{$_} ) } sort keys %h ) . '}';
 }
 
-# Reduce set_results into {byte,values} (regular) or {tag,values} (B0),
-# keeping only fields whose observations landed on exactly one offset —
-# more than one means the probe had a side effect (e.g. a sleep-curve
-# table appearing), which is not a clean single-property encoding.
-sub build_set_props {
-    my ($map) = @_;
-    my %props;
-    for my $r ( @{ $map->{set_results} } ) {
-        next unless $r->{state} eq 'derived';
-        if ( $r->{kind} eq 'regular' ) {
-            my %offsets;
-            for my $obs ( @{ $r->{observations} } ) {
-                $offsets{ $_->{offset} } = 1 for @{ $obs->{diff} };
-            }
-            next unless scalar( keys %offsets ) == 1;
-            my ($byte) = keys %offsets;
-            my %values;
-            for my $obs ( @{ $r->{observations} } ) {
-                my ($d) = grep { $_->{offset} == $byte } @{ $obs->{diff} };
-                $values{ $obs->{probe} } = $d->{b} if $d;
-            }
-            $props{ $r->{field} } = { kind => 'regular', byte => $byte + 0, values => \%values };
-        }
-        elsif ( $r->{kind} eq 'extended_property' ) {
-            next unless @{ $r->{tags} } == 1;
-            my $t = $r->{tags}[0];
-            $props{ $r->{field} } = { kind => 'extended_property', tag => $t->{tag} + 0, values => $t->{values} };
-        }
-    }
-    return \%props;
+# Runs device_src (the Midea-cloud-issued model .lua script) followed by
+# driver_src (a `return ...` calling its jsonToData/dataToJson) in one
+# fresh interpreter. A fresh run per call sidesteps the keyP state leak
+# documented in harness.lua — this project's CLI only ever makes one such
+# call per process anyway.
+sub lua_run {
+    my ( $device_src, $driver_src ) = @_;
+    my $eval = PureLua::Eval->new;
+    PureLua::Stdlib->install($eval);
+    my $ast = PureLua::Parser->parse("$device_src\n$driver_src");
+    my ($result) = $eval->run($ast);
+    return $eval->str_value($result);
 }
+
+# Extended ("B0/B1") properties this model's own query builder knows how
+# to ask for by name, and binToModel knows how to decode the TLV answer
+# back into — both confirmed by grepping the device script itself
+# (`queryType == "..."` in jsonToData's query branch; the matching
+# `messageBytes[cursor+0] == <tag>` in binToModel's B1 decode), not
+# guessed. `little_angel` and `gentle_wind_sense` are genuinely
+# write-only on this model — no query tag exists for either — so they're
+# left out rather than silently queried for nothing.
+my @EXTENDED_QUERY_PROPS = qw[
+    prevent_super_cool auto_prevent_straight_wind self_clean wind_straight
+    wind_avoid yb_wind_avoid intelligent_wind no_wind_sense fa_no_wind_sense
+    child_prevent_cold_wind cool_hot_sense security even_wind single_tuyere
+    extreme_wind voice_control pre_cool_hot water_pump intelligent_control
+    nobody_energy_save
+];
+
+# binToModel's B0/B1 decode loop walks a shared byte cursor through every
+# tag in one response, advancing it per tag by whatever fixed width the
+# *script* assumes for that specific tag (5 bytes for most, more for a
+# few). If a tag's real on-wire width on this unit doesn't match that
+# assumption, every tag *after* it in the same response reads from the
+# wrong offset — confirmed live: querying 10 properties at once decoded
+# the first few as plausible small numbers, then degraded into garbage
+# (one property came back as the raw tag byte of the *next* one). A tag's
+# own value is only reliably at the position the script expects when
+# nothing before it in the same response could have been misaligned —
+# i.e. when it's the *last* property asked for. So every property here is
+# queried in a 2-item batch, always second, behind a single fixed, known-
+# stable anchor ("self_clean": confirmed by querying it alone to decode
+# to a sane 0, independent of anything else). Costs one round trip per
+# property instead of a handful, but is the only arrangement confirmed
+# not to silently corrupt a neighbor's value.
+use constant EXTENDED_QUERY_ANCHOR => 'self_clean';
+
+# A query body under ~9 bytes (meaning very few properties were asked
+# for) trips a different, separate bug: binToModel's own early-exit guard
+# is `if (#binData < 8) then return nil end`, but `#` on a table indexed
+# from 0 (as every bodyBytes table here is) ignores index 0 and undercounts
+# by one — confirmed identical on real luajit, not an engine quirk — so a
+# single-property query (whose body is exactly 8 bytes) always measures as
+# 7 and always bails out empty, decoding nothing at all. The anchor pairing
+# above exists partly for this reason too: a 2-property body is long
+# enough to clear this guard.
 
 # --- Device I/O ---
 
@@ -513,230 +556,200 @@ sub get_status {
     my ($ip) = @_;
     my $data = [ @{ +STATUS_QUERY } ];
     push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
-    my $body = request_with_retry(
+    return request_with_retry(
         $ip, packet($data),
         sub { defined $_[0]->[0x0a] && ( $_[0]->[0x0a] == 0xc0 || $_[0]->[0x0a] == 0xc1 ) }
     );
-    return [ @{$body}[ 0x0a .. $#$body ] ]; # body[0] = response type byte
 }
 
-sub decode_properties {
-    my ( $body, $get_props ) = @_;
-    my %out;
-    for my $prop ( keys %$get_props ) {
-        my $p = $get_props->{$prop};
-        next unless defined $body->[ $p->{byte} ];
-        $out{$prop} = ( $body->[ $p->{byte} ] & $p->{mask} ) >> $p->{shift};
-    }
-    return \%out;
-}
+# Builds and sends a B1 query via the device script's own jsonToData (the
+# same "query" JSON shape it already supports), the same way cmd_set lets
+# it pick 0x40 vs 0xb0 — no hand-rolled tag table here either. The
+# returned frame already carries its own trailing checksum (getTotalMsg
+# again), hence wrap_packet, not packet(). The device acks a B1 query
+# with a B0/B1-typed frame, mirroring the B0 SET ack already confirmed on
+# the wire. Queries one property at a time (paired behind
+# EXTENDED_QUERY_ANCHOR — see the comments above @EXTENDED_QUERY_PROPS for
+# why) and skips any that come back unset: dataToJson's own returned JSON
+# never includes extended fields at all (confirmed live — it decodes a B1
+# response's TLV tags into keyP, then wipes keyP back to nil as its own
+# cleanup before returning, the same self-resetting behavior harness.lua
+# already documented for this function), so this calls its `binToModel`
+# directly instead — also file-scope-local, so reachable from here in the
+# same chunk, and the one piece of dataToJson's preamble that actually
+# populates keyP — then reads keyP immediately after, before anything has
+# a chance to clear it.
+sub get_extended_status {
+    my ( $ip, $device_src ) = @_;
+    my $device_info = DEVICE_INFO_LUA;
+    my %status;
 
-# Known model-specific enums (not derivable from the generic byte/bit
-# sweep, so hand-ported from this model's own keyB constants — the same
-# "bootstrap by hand once" exception as BASE_CONTROL in the generator).
-my %MODE_NAME = ( 1 => 'auto', 2 => 'cool', 3 => 'dry', 4 => 'heat', 5 => 'fan' );
-my %MODE_FROM_NAME = reverse %MODE_NAME;
-my %FAN_NAME = ( 102 => 'auto', 80 => 'high', 60 => 'medium', 40 => 'low', 20 => 'silent' );
+    for my $prop (@EXTENDED_QUERY_PROPS) {
+        next if $prop eq EXTENDED_QUERY_ANCHOR;
+        my $query_type = EXTENDED_QUERY_ANCHOR . ",$prop";
 
-# Confirmed by decrypting real TX/ACK pairs against this unit (see
-# .notes/): eco is set on bit7 of its byte but read back on bit4. No other
-# base-boolean field has shown this asymmetry.
-my %SET_BIT_OVERRIDE = ( eco => { mask => 0x80, shift => 7 } );
+        my $hex = lua_run(
+            $device_src,
+            qq{local JSON = require "cjson"\n}
+          . qq{local env = { deviceinfo = $device_info, query = { query_type = "$query_type" } }\n}
+          . qq{return jsonToData(JSON.encode(env))}
+        );
 
-# UNRELIABLE_SET: fields the generic single-byte engine can't handle yet.
-# tubro used to be here too — it looked like it needed a second,
-# unexplained byte, but that was the script's math.random() message-id
-# byte plus its dependent checksums bleeding into the probe diff (fixed in
-# harness.lua's regular_diff). pmv is genuinely two bytes (bodyBytes[17]
-# and [18]), which this engine doesn't support yet — that's a real gap,
-# not noise.
-my %UNRELIABLE_SET = ( pmv => 1 );
+        my @bytes = unpack( 'C*', pack( 'H*', $hex ) );
+        my $resp = request_with_retry(
+            $ip, wrap_packet( \@bytes ),
+            sub { defined $_[0]->[0x0a] && ( $_[0]->[0x0a] == 0xb0 || $_[0]->[0x0a] == 0xb1 ) }
+        );
 
-sub render_value {
-    my ( $prop, $raw, $set_props, $get_props ) = @_;
-    return undef unless defined $raw;
-    if ( $prop eq 'mode' ) { return $MODE_NAME{$raw} // "raw_$raw"; }
-    if ( $prop eq 'wind_speed' ) { return $FAN_NAME{$raw} // $raw; }
-    if ( $prop eq 'temperature' ) { return $raw + 16; } # small_temperature adds the .5 separately
-    if ( $prop eq 'indoor_temperature' || $prop eq 'outdoor_temperature' ) {
-        return 'n/a' if $raw == 0x00 || $raw == 0xff;
-        return ( $raw - 50 ) / 2;
+        my $json_text = lua_run(
+            $device_src,
+            qq{local JSON = require "cjson"\n}
+          . qq{local info = string2table("} . ahex($resp) . qq{")\n}
+          . qq{dataType = info[10]\n}
+          . qq{local msgBytes = {}\n}
+          . qq{for i = 1, #info do msgBytes[i - 1] = info[i] end\n}
+          . qq{local msgLength = msgBytes[1]\n}
+          . qq{local bodyLength = msgLength - keyB["BYTE_PROTOCOL_LENGTH"] - 1\n}
+          . qq{local bodyBytes = {}\n}
+          . qq{for i = 0, bodyLength do bodyBytes[i] = msgBytes[i + keyB["BYTE_PROTOCOL_LENGTH"]] end\n}
+          . qq{binToModel(bodyBytes, nil)\n}
+          . qq{return JSON.encode({ val = keyP["$prop"] })}
+        );
+        # A property the device didn't echo back leaves keyP[prop] nil,
+        # so Lua's `{val = nil}` has no "val" key at all — cjson's own
+        # ambiguous-empty-table heuristic then encodes it as "[]", not
+        # "{}", so json_decode hands back an arrayref here, not a
+        # hashref. Check the type rather than assume the shape.
+        my $decoded = json_decode($json_text);
+        $status{$prop} = $decoded->{val}
+          if ref($decoded) eq 'HASH' && defined $decoded->{val};
     }
-    if ( my $sp = $set_props->{$prop} ) {
-        my %rev;
-        for my $k ( keys %{ $sp->{values} } ) {
-            my $v = $sp->{values}{$k};
-            $rev{$v} = $k if $k eq 'on' || $k eq 'off';
-        }
-        return $rev{$raw} if exists $rev{$raw};
-    }
-    # No set-side on/off table (e.g. a base-control field the generator
-    # never had to probe) — a single-bit field is still safe to render as
-    # on/off; anything wider stays a raw number rather than guessing.
-    if ( $get_props->{$prop} && $get_props->{$prop}{mask} == ( 1 << $get_props->{$prop}{shift} ) ) {
-        return $raw ? 'on' : 'off';
-    }
-    return $raw;
+
+    return \%status;
 }
 
 sub cmd_get {
-    my ( $ip, $get_props, $set_props ) = @_;
-    my $body = get_status($ip);
-    my $values = decode_properties( $body, $get_props );
-    if ( exists $values->{temperature} && exists $values->{small_temperature} ) {
-        $values->{temperature} += 0.5 if $values->{small_temperature};
-    }
-    for my $prop ( sort keys %$values ) {
-        next if $prop eq 'small_temperature'; # folded into temperature above
-        printf "%s:%s\n", $prop, render_value( $prop, $values->{$prop}, $set_props, $get_props );
+    my ( $ip, $device_src ) = @_;
+    my $hex = ahex( get_status($ip) );
+    my $device_info = DEVICE_INFO_LUA;
+
+    my $json_text = lua_run(
+        $device_src,
+        qq{local JSON = require "cjson"\n}
+      . qq{local env = { deviceinfo = $device_info, msg = { data = "$hex" } }\n}
+      . qq{return dataToJson(JSON.encode(env))}
+    );
+
+    my $decoded = json_decode($json_text);
+    my $status  = $decoded->{status} // {};
+
+    # Extended properties are a best-effort add-on — a device that
+    # rejects or doesn't answer the B1 query shouldn't take down the
+    # regular status this command already has in hand.
+    my $extended = eval { get_extended_status( $ip, $device_src ) };
+    warn "extended properties unavailable: $@" if $@;
+    %$status = ( %$status, %$extended ) if $extended;
+
+    for my $prop ( sort keys %$status ) {
+        printf "%s:%s\n", $prop, $status->{$prop};
     }
 }
 
 sub cmd_set {
-    my ( $ip, $base_frame_hex, $get_props, $set_props, %want ) = @_;
+    my ( $ip, $device_src, %want ) = @_;
 
-    my @bytes = unpack( 'C*', pack( 'H*', $base_frame_hex ) );
-    my @header = @bytes[ 0 .. 9 ];
-    my @body   = @bytes[ 10 .. $#bytes - 1 ]; # drop header + trailing checksum
-
-    my @extended_tags; # [tag, value] pairs for a B0 property-list command
-
-    for my $prop ( keys %want ) {
-        my $val = $want{$prop};
-
-        if ( $prop eq 'mode' ) {
-            my $code = $MODE_FROM_NAME{$val} // die "unknown mode: $val\n";
-            my $gp = $get_props->{mode} or die "no mode mapping in map\n";
-            $body[ $gp->{byte} ] = ( $body[ $gp->{byte} ] & ~$gp->{mask} ) | ( $code << $gp->{shift} );
-            next;
-        }
-        if ( $prop eq 'temperature' ) {
-            my $gp = $get_props->{temperature} or die "no temperature mapping in map\n";
-            my $half = ( $val * 2 ) % 2 ? 1 : 0;
-            my $whole = POSIX::floor($val) - 16;
-            $body[ $gp->{byte} ] = ( $body[ $gp->{byte} ] & ~$gp->{mask} ) | ( $whole << $gp->{shift} );
-            if ( my $sb = $get_props->{small_temperature} ) {
-                $body[ $sb->{byte} ] = ( $body[ $sb->{byte} ] & ~$sb->{mask} ) | ( $half << $sb->{shift} );
-            }
-            next;
-        }
-        if ( $prop eq 'wind_speed' ) {
-            my %from_name = reverse %FAN_NAME;
-            my $code = $from_name{$val} // ( $val =~ /^\d+$/ ? $val : die "unknown wind_speed: $val\n" );
-            my $gp = $get_props->{wind_speed} or die "no wind_speed mapping in map\n";
-            $body[ $gp->{byte} ] = ( $body[ $gp->{byte} ] & ~$gp->{mask} ) | ( $code << $gp->{shift} );
-            next;
-        }
-
-        my $sp = $set_props->{$prop};
-
-        die "$prop: known-unreliable generic set (see UNRELIABLE_SET comment), refusing rather than sending a possibly-wrong packet\n"
-          if $UNRELIABLE_SET{$prop};
-
-        if ( !$sp && $get_props->{$prop} ) {
-            # A base-control boolean (power, swing, eco, turbo-ish flags...)
-            # was never in the generator's probe sweep, since it was
-            # already fixed in BASE_CONTROL rather than varied. Its set
-            # bit is the same as its get bit for every field we've checked
-            # against the real device — except eco, which this model
-            # reads back on a different bit than it's written on (see
-            # SET_BIT_OVERRIDE; found by live wire testing, not guessed).
-            my $gp = $get_props->{$prop};
-            my ( $mask, $shift ) = ( $gp->{mask}, $gp->{shift} );
-            if ( my $ov = $SET_BIT_OVERRIDE{$prop} ) {
-                ( $mask, $shift ) = ( $ov->{mask}, $ov->{shift} );
-            }
-            die "$prop is not a single-bit field — not settable generically\n"
-              unless $mask == ( 1 << $shift );
-            my $bit = ( $val eq 'on' ) ? 1 : ( $val eq 'off' ) ? 0
-              : die "unknown value \"$val\" for $prop (use on/off)\n";
-            $body[ $gp->{byte} ] = ( $body[ $gp->{byte} ] & ~$mask ) | ( $bit << $shift );
-            next;
-        }
-        die "property not settable (not in generated map): $prop\n" unless $sp;
-
-        if ( $sp->{kind} eq 'regular' ) {
-            my $byte_val = $sp->{values}{$val};
-            die "unknown value \"$val\" for $prop\n" unless defined $byte_val;
-            $body[ $sp->{byte} ] = $byte_val;
-        }
-        elsif ( $sp->{kind} eq 'extended_property' ) {
-            my $v = $sp->{values}{$val};
-            die "unknown value \"$val\" for $prop\n" unless defined $v;
-            push @extended_tags, [ $sp->{tag}, $v ];
-        }
+    if ( exists $want{temperature} ) {
+        my $val   = delete $want{temperature};
+        my $whole = POSIX::floor($val);
+        $want{temperature}       = $whole;
+        $want{small_temperature} = ( $val - $whole >= 0.5 ) ? 0.5 : 0;
+    }
+    if ( exists $want{wind_speed} ) {
+        my $val = $want{wind_speed};
+        $want{wind_speed} = $WIND_SPEED_CODE{$val}
+          // ( $val =~ /^\d+$/ ? $val : die "unknown wind_speed: $val\n" );
     }
 
-    my $data;
-    if (@extended_tags) {
-        $data = [ @header, 0xb0, scalar(@extended_tags) ];
-        for my $t (@extended_tags) {
-            push @{$data}, ( $t->[0] & 0xff ), ( $t->[0] >> 8 ), 0x01, ( $t->[1] & 0xff );
-        }
-    }
-    else {
-        $data = [ @header, @body ];
-    }
+    my %control      = ( %BASE_CONTROL, %want );
+    my $control_lua  = lua_table_literal(%control);
+    my $device_info  = DEVICE_INFO_LUA;
 
-    push @{$data}, crc8( [ @{$data}[ 0x0a .. $#$data ] ] );
-    $data->[0x01] = scalar(@$data);
+    my $hex = lua_run(
+        $device_src,
+        qq{local JSON = require "cjson"\n}
+      . qq{local env = { deviceinfo = $device_info, control = $control_lua }\n}
+      . qq{return jsonToData(JSON.encode(env))}
+    );
 
-    my $resp = request_with_retry( $ip, packet($data) );
+    my @bytes = unpack( 'C*', pack( 'H*', $hex ) );
+    my $resp = request_with_retry( $ip, wrap_packet( \@bytes ) );
     dbg( 'SET/ack', $resp );
     return 1;
 }
 
 # --- CLI ---
+#
+# Guarded by `unless (caller)` so t/ac_ng.t can `require` this file to
+# exercise lua_run/lua_table_literal/cmd_get/cmd_set directly (against the
+# real device .lua, no network) without Getopt::Long dying on missing
+# --ip/--lua or the script trying to hit the network at require time.
 
-my %opt;
-Getopt::Long::GetOptions(
-    \%opt,
-    'ip=s', 'protocol=s', 'get', 'set', 'debug', 'help',
-    'power=s', 'mode=s', 'temperature=f', 'wind_speed=s',
-    map { "$_=s" } qw[
-      wind_swing_lr wind_swing_ud strong_wind comfort_sleep purifier eco dry
-      prevent_cold power_saving ptc buzzer tubro comfort_power_save
-      natural_wind screen_display no_wind_sense fa_no_wind_sense security
-      self_clean wind_avoid intelligent_wind child_prevent_cold_wind
-      little_angel cool_hot_sense gentle_wind_sense even_wind single_tuyere
-      extreme_wind voice_control pre_cool_hot nobody_energy_save water_pump
-      intelligent_control prevent_super_cool wind_straight
-      auto_prevent_straight_wind yb_wind_avoid
-    ],
-) or die "bad options\n";
+unless (caller) {
+    my %opt;
+    Getopt::Long::GetOptions(
+        \%opt,
+        'ip=s', 'lua=s', 'get', 'set', 'debug', 'help',
+        'power=s', 'mode=s', 'temperature=f', 'wind_speed=s',
+        map { "$_=s" } qw[
+          wind_swing_lr wind_swing_ud strong_wind comfort_sleep purifier eco dry
+          prevent_cold power_saving ptc buzzer tubro comfort_power_save
+          natural_wind screen_display no_wind_sense fa_no_wind_sense security
+          self_clean wind_avoid intelligent_wind child_prevent_cold_wind
+          little_angel cool_hot_sense gentle_wind_sense even_wind single_tuyere
+          extreme_wind voice_control pre_cool_hot nobody_energy_save water_pump
+          intelligent_control prevent_super_cool wind_straight
+          auto_prevent_straight_wind yb_wind_avoid
+        ],
+    ) or die "bad options\n";
 
-if ( $opt{help} || !$opt{ip} || !$opt{protocol} ) {
-    print STDERR <<'USAGE';
+    if ( $opt{help} || !$opt{ip} || !$opt{lua} ) {
+        print STDERR <<'USAGE';
 Usage:
-  ac-ng.pl --ip <addr> --protocol <model.protocol.json> --get
-  ac-ng.pl --ip <addr> --protocol <model.protocol.json> --set --power on --mode cool --temperature 24
+  ac-ng.pl --ip <addr> --lua <model.lua> --get
+  ac-ng.pl --ip <addr> --lua <model.lua> --set --power on --mode cool --temperature 24
 
---protocol is the file written by reverse/lua/lua2map.pl for your device
-model. This tool does not derive protocol knowledge itself — it only
-applies what that map already found.
+--lua is the Midea-cloud-issued, device-model-specific protocol script for
+your device (as downloaded by ac-check.pl --lua). This tool runs its real
+jsonToData/dataToJson through a pure-Perl Lua interpreter instead of
+guessing byte offsets.
 USAGE
-    exit( $opt{help} ? 0 : 2 );
-}
-
-$DEBUG = 1 if $opt{debug};
-
-my $map        = load_map( $opt{protocol} );
-my $get_props  = build_get_props($map);
-my $set_props  = build_set_props($map);
-
-if ( $opt{get} ) {
-    cmd_get( $opt{ip}, $get_props, $set_props );
-}
-elsif ( $opt{set} ) {
-    my %want;
-    for my $k ( keys %opt ) {
-        next if $k =~ /^(ip|protocol|get|set|debug|help)$/;
-        $want{$k} = $opt{$k} if defined $opt{$k};
+        exit( $opt{help} ? 0 : 2 );
     }
-    die "nothing to set (no property flags given)\n" unless %want;
-    cmd_set( $opt{ip}, $map->{base_frame}, $get_props, $set_props, %want );
-    print "OK\n";
+
+    $DEBUG = 1 if $opt{debug};
+
+    my $device_src = do {
+        open my $fh, '<', $opt{lua} or die "open $opt{lua}: $!\n";
+        local $/;
+        <$fh>;
+    };
+
+    if ( $opt{get} ) {
+        cmd_get( $opt{ip}, $device_src );
+    }
+    elsif ( $opt{set} ) {
+        my %want;
+        for my $k ( keys %opt ) {
+            next if $k =~ /^(ip|lua|get|set|debug|help)$/;
+            $want{$k} = $opt{$k} if defined $opt{$k};
+        }
+        die "nothing to set (no property flags given)\n" unless %want;
+        cmd_set( $opt{ip}, $device_src, %want );
+        print "OK\n";
+    }
+    else {
+        die "need --get or --set\n";
+    }
 }
-else {
-    die "need --get or --set\n";
-}
+
+1;
